@@ -1,0 +1,26 @@
+{
+  "name": "@assetsync/sdk",
+  "version": "0.1.0",
+  "description": "AssetSync downstream SDK: pull game asset versions with chunk-level delta updates and no local object cache.",
+  "type": "module",
+  "main": "./src/index.js",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./src/index.js"
+    }
+  },
+  "bin": {
+    "assetsync-node": "./bin/cli.js"
+  },
+  "files": ["src", "bin", "index.d.ts", "README.md"],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "author": "Pimeng",
+  "license": "MIT"
+}

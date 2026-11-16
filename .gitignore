@@ -1,0 +1,10 @@
+/bin/
+/dist/
+/data/
+/tests/.work/
+node_modules/
+__pycache__/
+*.pyc
+*.egg-info/
+.assetsync/
+server.local.json

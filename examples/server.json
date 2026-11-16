@@ -1,0 +1,15 @@
+{
+  "listen": ":8080",
+  "storage": {
+    "type": "local",
+    "path": "./data"
+  },
+  "tokens": [
+    { "name": "ci-publisher", "token": "CHANGE-ME-publish-token-0001", "role": "publish", "projects": ["*"] },
+    { "name": "plugins",      "token": "CHANGE-ME-read-token-000001",  "role": "read",    "projects": ["mygame"] },
+    { "name": "ops",          "token": "CHANGE-ME-admin-token-00001",  "role": "admin",   "projects": ["*"] }
+  ],
+  "allowAnonymousRead": false,
+  "gcGrace": "1h",
+  "versionCacheTTL": "15s"
+}
