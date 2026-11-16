@@ -6,31 +6,19 @@ import (
 	"errors"
 	"fmt"
 	"path"
-	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"assetsync/internal/catalog"
 	"assetsync/internal/manifest"
-	"assetsync/internal/semver"
 	"assetsync/internal/storage"
 	"assetsync/internal/wire"
 )
 
-// VersionInfo 是与每个 manifest 一起存储的元数据。
-type VersionInfo struct {
-	Version      string    `json:"version"`
-	CreatedAt    time.Time `json:"createdAt"`
-	Prerelease   bool      `json:"prerelease"`
-	FileCount    int       `json:"fileCount"`
-	TotalSize    int64     `json:"totalSize"`
-	ChunkCount   int       `json:"chunkCount"`
-	ManifestSize int64     `json:"manifestSize"`
-	// BaseVersion 是发布时最接近的较低版本；DeltaBytes 是本版本在其基础上
-	// 新增的块的原始大小。
-	BaseVersion string `json:"baseVersion,omitempty"`
-	DeltaBytes  int64  `json:"deltaBytes"`
-}
+// VersionInfo 是与每个 manifest 一起存储的元数据（类型定义在 catalog 包，
+// 供服务端与静态发布端共用）。
+type VersionInfo = catalog.VersionInfo
 
 type project struct {
 	name string
@@ -181,27 +169,11 @@ func (p *project) dropVersion(v string) {
 }
 
 // sortedVersions 返回按降序排列的版本。
-func sortedVersions(m map[string]*VersionInfo) []*VersionInfo {
-	out := make([]*VersionInfo, 0, len(m))
-	for _, v := range m {
-		out = append(out, v)
-	}
-	sort.Slice(out, func(i, j int) bool { return semver.CompareStrings(out[i].Version, out[j].Version) > 0 })
-	return out
-}
+func sortedVersions(m map[string]*VersionInfo) []*VersionInfo { return catalog.Sorted(m) }
 
 // latest 选出最高的稳定版本；若允许预发布版本或不存在稳定版本，则选出最高的预发布版本。
 func latest(m map[string]*VersionInfo, allowPre bool) *VersionInfo {
-	sorted := sortedVersions(m)
-	for _, v := range sorted {
-		if allowPre || !v.Prerelease {
-			return v
-		}
-	}
-	if len(sorted) > 0 {
-		return sorted[0]
-	}
-	return nil
+	return catalog.Latest(m, allowPre)
 }
 
 // resolve 把 "latest" 或明确的版本号映射到对应的版本信息。

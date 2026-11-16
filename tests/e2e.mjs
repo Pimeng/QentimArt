@@ -11,6 +11,7 @@ import fs from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import net from 'node:net';
+import httpMod from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { AssetSyncClient, SyncConflictError } from '../sdk/nodejs/src/index.js';
 
@@ -207,6 +208,8 @@ async function main() {
     console.log(`  ${counts.smallFiles} small, ${counts.mediumFiles} medium, ${counts.largeFiles} large files, ${fmt(srcSize)}`);
     const tree1 = await treeHashes(src);
 
+    const site = path.join(WORK, 'site'); // 静态分发树（持久镜像）
+
     const publish = (version) => {
       const t = Date.now();
       const r = run(EXE, ['publish', '-server', server, '-project', PROJECT, '-token', PUB, '-version', version, src]);
@@ -215,13 +218,17 @@ async function main() {
       console.log(`  published ${version}: ${res.NewChunks}/${res.Chunks} new chunks, uploaded ${fmt(res.UploadedRaw)} (${fmt(res.UploadedWire)} wire) in ${secs.toFixed(2)}s`);
       return res;
     };
+    // 同一 src 状态下，同时构建静态分发树（供后面的静态模式检查）。
+    const publishStatic = (version) => run(EXE, ['publish', '--static', '-o', site, '-project', PROJECT, '-version', version, src]);
 
     console.log('\n== publish');
     publish('1.0.0');
+    publishStatic('1.0.0');
     const server1 = await dirSize(dataDir);
     await mutate(src, counts);
     const tree2 = await treeHashes(src);
     const pub2 = publish('1.1.0');
+    publishStatic('1.1.0');
     const server2 = await dirSize(dataDir);
     console.log(`  server storage: v1 ${fmt(server1)}, after v1.1.0 ${fmt(server2)} (+${fmt(server2 - server1)})`);
     check(server2 - server1 < pub2.UploadedRaw * 1.05 + MiB, 'server only stores the delta for 1.1.0');
@@ -294,23 +301,69 @@ async function main() {
 
     // --------------------------------------------------- Python SDK
     const py = process.env.PYTHON ?? (process.platform === 'win32' ? 'python' : 'python3');
+    const pyEnv = { ...process.env, PYTHONPATH: path.join(ROOT, 'sdk', 'python') };
+    const expect1 = path.join(WORK, 'tree1.json');
+    const expect2 = path.join(WORK, 'tree2.json');
+    await fs.writeFile(expect1, JSON.stringify(Object.fromEntries(tree1)));
+    await fs.writeFile(expect2, JSON.stringify(Object.fromEntries(tree2)));
+    const runPy = (file, args) => {
+      const res = spawnSync(py, [file, ...args], { encoding: 'utf8', env: pyEnv, maxBuffer: 64 * MiB });
+      process.stdout.write(res.stdout);
+      process.stderr.write(res.stderr);
+      failures += (res.stdout.match(/^ {2}FAIL/gm) || []).length;
+      if (res.status !== 0 && !(res.stdout || '').includes('FAIL')) failures++;
+    };
     const pyTest = path.join(ROOT, 'sdk', 'python', 'tests', 'e2e_client.py');
     if (!process.env.E2E_SKIP_PYTHON && existsSync(pyTest)) {
       console.log('\n== Python SDK');
-      const expect1 = path.join(WORK, 'tree1.json');
-      const expect2 = path.join(WORK, 'tree2.json');
-      await fs.writeFile(expect1, JSON.stringify(Object.fromEntries(tree1)));
-      await fs.writeFile(expect2, JSON.stringify(Object.fromEntries(tree2)));
-      const res = spawnSync(py, [pyTest, server, PROJECT, READ, path.join(WORK, 'py-dst'), expect1, expect2, String(pub2.UploadedRaw)], {
-        encoding: 'utf8',
-        env: { ...process.env, PYTHONPATH: path.join(ROOT, 'sdk', 'python') },
-        maxBuffer: 64 * MiB,
-      });
-      process.stdout.write(res.stdout);
-      process.stderr.write(res.stderr);
-      const fails = (res.stdout.match(/^ {2}FAIL/gm) || []).length;
-      failures += fails;
-      if (res.status !== 0 && fails === 0) failures++;
+      runPy(pyTest, [server, PROJECT, READ, path.join(WORK, 'py-dst'), expect1, expect2, String(pub2.UploadedRaw)]);
+    }
+
+    // --------------------------------------------------- 静态模式（Cloudflare Pages 式）
+    console.log('\n== 静态模式');
+    let fileCount = 0;
+    for (const e of await fs.readdir(site, { recursive: true, withFileTypes: true })) if (e.isFile()) fileCount++;
+    const staticSrv = httpMod.createServer((req, res) => {
+      const rel = decodeURIComponent(req.url.split('?')[0]).replace(/^\/+/, '');
+      const fp = path.join(site, rel);
+      if (!fp.startsWith(site)) {
+        res.statusCode = 403;
+        return res.end('forbidden');
+      }
+      fs.readFile(fp).then(
+        (b) => res.end(b),
+        () => {
+          res.statusCode = 404;
+          res.end('not found');
+        },
+      );
+    });
+    await new Promise((r) => staticSrv.listen(0, '127.0.0.1', r));
+    const baseUrl = `http://127.0.0.1:${staticSrv.address().port}`;
+    try {
+      const sclient = new AssetSyncClient({ baseUrl, concurrency: 16 });
+      const sdst = path.join(WORK, 'static-dst');
+      let sr = await sclient.sync(sdst, { version: '1.0.0' });
+      console.log(`  静态全新同步 1.0.0: ${fmt(sr.bytes.downloadedWire)} in ${(sr.elapsedMs / 1000).toFixed(2)}s = ${fmt(sr.bytesPerSecond)}/s`);
+      check(!sameTree(tree1, await treeHashes(sdst)), '静态模式全新同步逐字节一致 (1.0.0)');
+      let srep = await AssetSyncClient.storageReport(sdst);
+      check(srep.ratio <= 1.1, `静态模式 ratio ${(srep.ratio * 100).toFixed(3)}% <= 110%`);
+      sr = await sclient.sync(sdst);
+      check(sr.version === '1.1.0' && !sameTree(tree2, await treeHashes(sdst)), '静态模式增量更新逐字节一致 (1.1.0)');
+      check(sr.bytes.downloadedRaw <= pub2.UploadedRaw + MiB, `静态模式只下载差异 (${fmt(sr.bytes.downloadedRaw)} <= ${fmt(pub2.UploadedRaw)} + 1MiB)`);
+      check(sr.bytes.reusedLocal > 0, '静态模式复用本地已有的块');
+      sr = await sclient.sync(sdst);
+      check(sr.upToDate && sr.bytes.downloadedWire === 0, '静态模式第二次同步为空操作');
+      console.log(`  静态树文件数 ${fileCount}（Cloudflare Pages 免费版上限 20000）`);
+      sclient.close();
+
+      // Python 静态检查自己托管 site 目录（独立进程），不受此处 spawnSync 阻塞影响。
+      const pyStatic = path.join(ROOT, 'sdk', 'python', 'tests', 'e2e_static.py');
+      if (!process.env.E2E_SKIP_PYTHON && existsSync(pyStatic)) {
+        runPy(pyStatic, [site, path.join(WORK, 'py-static-dst'), expect1, expect2, String(pub2.UploadedRaw)]);
+      }
+    } finally {
+      staticSrv.close();
     }
   } finally {
     srv.kill();

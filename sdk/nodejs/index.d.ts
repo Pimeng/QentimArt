@@ -10,8 +10,11 @@ export declare class SyncConflictError extends AssetSyncError {
 }
 
 export interface ClientOptions {
-  server: string;
-  project: string;
+  /** 静态模式：项目静态树的公开根地址（如 https://game.pages.dev），设置后无需 server/token。 */
+  baseUrl?: string;
+  /** 动态模式：服务端地址。 */
+  server?: string;
+  project?: string;
   token?: string;
   /** 并行的 chunk 获取请求数（默认 8）。 */
   concurrency?: number;
@@ -158,8 +161,11 @@ export interface StatusResult {
   untracked: string[];
 }
 
+export type Mode = 'api' | 'static';
+
 export declare class AssetSyncClient {
   constructor(opts: ClientOptions);
+  readonly mode: Mode;
   readonly project: string;
   close(): void;
   listVersions(): Promise<VersionList>;

@@ -16,8 +16,10 @@ import (
 	"os/signal"
 	"strings"
 
+	"assetsync/internal/catalog"
 	"assetsync/internal/cdc"
 	"assetsync/internal/publish"
+	"assetsync/internal/storage"
 )
 
 var version = "0.1.0"
@@ -31,6 +33,12 @@ const usage = `AssetSync 客户端 %s
   assetsync diff           [连接参数] -from 1.0.0 -to 1.1.0
   assetsync delete-version [连接参数] -version 1.0.0
   assetsync gc             [连接参数] [-dry-run]
+
+静态模式（无需服务端，构建静态分发树到本地目录，再用 wrangler / rsync 部署）:
+  assetsync publish        --static -o DIR -version 1.2.3 [-chunk-avg 4194304] [-project NAME] SRC
+  assetsync versions       --static -o DIR
+  assetsync delete-version --static -o DIR -version 1.0.0
+  assetsync gc             --static -o DIR [-dry-run]
 
 连接参数（也可使用环境变量 ASSETSYNC_SERVER / ASSETSYNC_PROJECT / ASSETSYNC_TOKEN）:
   -server URL   -project NAME   -token TOKEN
@@ -97,17 +105,15 @@ func cmdPublish(ctx context.Context, args []string) error {
 	conc := fs.Int("concurrency", 8, "并行上传流数量")
 	compress := fs.String("compress", "auto", "压缩模式：auto | none")
 	exclude := fs.String("exclude", "", "要跳过的 glob 模式，以逗号分隔（例如 '*.tmp,Library/'）")
-	dry := fs.Bool("dry-run", false, "仅分块并报告将要上传的内容，不实际上传")
+	dry := fs.Bool("dry-run", false, "仅分块并报告将要处理的内容，不实际写入")
+	static := fs.Bool("static", false, "静态模式：直接构建静态分发树（无需服务端），配合 -o")
+	outDir := fs.String("o", "", "静态模式的输出目录（持久镜像，重复发布只写新块）")
 	minC := fs.Int("chunk-min", cdc.Default.Min, "最小块大小")
 	avgC := fs.Int("chunk-avg", cdc.Default.Avg, "平均块大小（须为 2 的幂）")
 	maxC := fs.Int("chunk-max", cdc.Default.Max, "最大块大小")
 	fs.Parse(args)
 	if fs.NArg() != 1 || *ver == "" {
-		return errors.New("usage: assetsync publish -version X.Y.Z [flags] DIR")
-	}
-	c, err := cf.client(*conc)
-	if err != nil {
-		return err
+		return errors.New("usage: assetsync publish [--static -o DIR] -version X.Y.Z [flags] DIR")
 	}
 	var ex []string
 	for _, e := range strings.Split(*exclude, ",") {
@@ -115,11 +121,29 @@ func cmdPublish(ctx context.Context, args []string) error {
 			ex = append(ex, e)
 		}
 	}
-	res, err := publish.Run(ctx, c, publish.Options{
+	opts := publish.Options{
 		Dir: fs.Arg(0), Version: *ver, Concurrency: *conc, Compress: *compress, Excludes: ex, DryRun: *dry,
 		Params: cdc.Params{Min: *minC, Avg: *avgC, Max: *maxC},
 		Logf:   func(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) },
-	})
+	}
+	var res *publish.Result
+	var err error
+	if *static {
+		if *outDir == "" {
+			return errors.New("--static 需要 -o <输出目录>")
+		}
+		var backend storage.Backend
+		if backend, err = storage.NewLocal(*outDir); err != nil {
+			return err
+		}
+		res, err = publish.RunStatic(ctx, backend, *cf.project, opts)
+	} else {
+		var c *publish.Client
+		if c, err = cf.client(*conc); err != nil {
+			return err
+		}
+		res, err = publish.Run(ctx, c, opts)
+	}
 	if err != nil {
 		return err
 	}
@@ -135,7 +159,49 @@ func cmdSimple(ctx context.Context, args []string, what string) error {
 	from := fs.String("from", "", "diff：起始版本")
 	to := fs.String("to", "latest", "diff：目标版本")
 	dry := fs.Bool("dry-run", false, "gc：仅报告，不实际删除")
+	static := fs.Bool("static", false, "静态模式：直接操作本地静态树，配合 -o")
+	outDir := fs.String("o", "", "静态模式的静态树目录")
 	fs.Parse(args)
+
+	if *static {
+		if *outDir == "" {
+			return errors.New("--static 需要 -o <目录>")
+		}
+		backend, err := storage.NewLocal(*outDir)
+		if err != nil {
+			return err
+		}
+		var out any
+		switch what {
+		case "versions":
+			b, err := storage.ReadAll(ctx, backend, catalog.IndexKey)
+			if err != nil {
+				return err
+			}
+			fmt.Println(string(b))
+			return nil
+		case "delete":
+			if *ver == "latest" {
+				return errors.New("-version must be explicit")
+			}
+			if err := publish.DeleteVersionStatic(ctx, backend, *cf.project, *ver); err != nil {
+				return err
+			}
+			out = map[string]any{"deleted": *ver, "hint": "run gc --static -o DIR to reclaim chunk storage"}
+		case "gc":
+			r, err := publish.GCStatic(ctx, backend, *dry)
+			if err != nil {
+				return err
+			}
+			out = r
+		default:
+			return fmt.Errorf("%s 不支持 --static（请直接读取静态树或使用 SDK）", what)
+		}
+		b, _ := json.MarshalIndent(out, "", "  ")
+		fmt.Println(string(b))
+		return nil
+	}
+
 	c, err := cf.client(2)
 	if err != nil {
 		return err

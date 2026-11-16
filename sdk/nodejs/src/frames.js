@@ -70,6 +70,15 @@ export function sha256hex(buf) {
   return createHash('sha256').update(buf).digest('hex');
 }
 
+/**
+ * 解码一个静态 blob 对象（enc u8 | rawLen u32be | payload），校验哈希。
+ * 静态模式下每个 chunk 就是这样一个对象（与服务端存储格式一致）。
+ */
+export async function decodeBlob(buf, hashHex) {
+  if (buf.length < 5) throw new AssetSyncError(`chunk ${hashHex}: blob too short`, { code: 'ECORRUPT' });
+  return decodeFrame({ hash: hashHex, enc: buf[0], rawLen: buf.readUInt32BE(1), payload: buf.subarray(5) });
+}
+
 /** 将帧 payload 解码为原始字节并校验其哈希。 */
 export async function decodeFrame(f) {
   let raw;

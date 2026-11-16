@@ -88,3 +88,54 @@ gzip 压缩的 JSON，文件按路径排序：
 ```
 
 `mtimeMs` 为整数毫秒（`floor(mtime)`）。Node 和 Python SDK 的状态格式相同，可以互相接管同一个目录。
+
+## 静态分发树（方案 B）
+
+静态模式把一个项目发布成一棵只读的对象树，部署到任意静态托管（Cloudflare Pages / S3 静态网站 / nginx / CDN）。客户端只用一个公开的根地址（baseUrl）即可，全程只有 `GET`、默认不鉴权。
+
+布局（一个输出目录即一个项目，不带 `projects/<p>/` 前缀）：
+
+```
+<root>/
+  _headers                        Cloudflare Pages 缓存头（index.json 短 TTL，其余 immutable）
+  index.json                      版本索引（唯一可变文件）
+  versions/<v>/manifest.json.gz   与动态服务端完全相同的清单格式，不可变
+  versions/<v>/meta.json          版本元数据（VersionInfo），不可变
+  chunks/<哈希前两位>/<哈希>        不可变 blob
+```
+
+### index.json
+
+```json
+{
+  "formatVersion": 1,
+  "project": "mygame",
+  "updatedAt": "2026-11-16T10:00:00Z",
+  "latest": "1.1.0",
+  "latestPrerelease": "1.2.0-beta.1",
+  "versions": [ { "version": "1.1.0", "createdAt": "...", "prerelease": false, "fileCount": 1500, "totalSize": 0, "chunkCount": 1500, "manifestSize": 0, "baseVersion": "1.0.0", "deltaBytes": 0 } ]
+}
+```
+
+- `latest` / `latestPrerelease` 由发布端在发布时预先算好（静态托管无法在读取时列目录排序）。客户端请求 `latest` 时，稳定版取 `latest`，带 `prerelease` 时取 `latestPrerelease`。
+- `versions` 按 SemVer 降序，每项即 `meta.json` 的内容。
+
+### chunk 作为静态对象
+
+静态树里的每个 chunk 对象就是服务端存储格式中的 **blob**（不是帧）：
+
+```
+enc    uint8     0 = 原始, 1 = raw DEFLATE
+rawLen uint32 BE 原始长度
+payload          原始或 DEFLATE 数据
+```
+
+客户端 `GET chunks/<哈希前两位>/<哈希>` 后，解析该头、按需 inflate，并校验 SHA-256。压缩效果与动态模式一致。
+
+### 客户端读取流程
+
+1. `GET {base}/index.json` → 解析目标版本（`latest` 或指定版本）。
+2. `GET {base}/versions/<v>/manifest.json.gz` → 得到文件与块列表。
+3. 对比本地状态，复用本地已有的块，其余并发 `GET {base}/chunks/..`。
+
+缓存：`index.json` 唯一可变，用短 TTL；`manifest` 和 `chunks` 不可变，可永久缓存。

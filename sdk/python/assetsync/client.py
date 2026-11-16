@@ -14,34 +14,50 @@ from ._http import HttpClient
 from ._localfs import dir_bytes, hash_file, run_pool, scan_dir
 from ._plan import PlanContext, build_plan, build_sources, estimate_download
 from ._state import TMP_DIR, acquire_lock, read_state, write_state
+from ._static import StaticTransport, version_from_index
 from ._sync import Stats, apply_writes, delete_files
-from ._wire import STATE_DIR, Manifest, parse_manifest
+from ._wire import STATE_DIR, Manifest, decode_chunk, diff_manifests, iter_frames, parse_manifest
 
 ProgressFn = Callable[[Dict[str, Any]], None]
 
 
 class AssetSyncClient:
-    """AssetSync 下游客户端。
+    """AssetSync 下游客户端。两种模式：
+
+    动态：AssetSyncClient("http://assets:8080", "mygame", token="...")  —— 走服务端 HTTP API
+    静态：AssetSyncClient(base_url="https://game.pages.dev")            —— 从公开静态树只读拉取，无需鉴权
 
     >>> client = AssetSyncClient("http://assets:8080", "mygame", token="...")
     >>> result = client.sync("./assets")
     """
 
-    def __init__(self, server: str, project: str, token: Optional[str] = None, concurrency: int = 8,
-                 batch_bytes: int = 16 << 20, batch_chunks: int = 2048, wave_bytes: int = 512 << 20,
-                 wave_files: int = 2048, timeout: float = 60.0, retries: int = 3):
-        if not server or not project:
-            raise AssetSyncError("server and project are required")
-        self.project = project
+    def __init__(self, server: Optional[str] = None, project: Optional[str] = None, token: Optional[str] = None,
+                 concurrency: int = 8, batch_bytes: int = 16 << 20, batch_chunks: int = 2048,
+                 wave_bytes: int = 512 << 20, wave_files: int = 2048, timeout: float = 60.0, retries: int = 3,
+                 base_url: Optional[str] = None):
         self.concurrency = concurrency
         self.batch_bytes = batch_bytes
         self.batch_chunks = batch_chunks
         self.wave_bytes = wave_bytes
         self.wave_files = wave_files
-        self._http = HttpClient(server, project, token, timeout, retries)
+        self._http = None
+        self._static = None
+        if base_url:
+            self.mode = "static"
+            self.project = project
+            self._static = StaticTransport(base_url, concurrency, timeout, retries)
+        else:
+            if not server or not project:
+                raise AssetSyncError("server and project are required (or pass base_url= for static mode)")
+            self.mode = "api"
+            self.project = project
+            self._http = HttpClient(server, project, token, timeout, retries)
 
     def close(self) -> None:
-        self._http.close()
+        if self._http is not None:
+            self._http.close()
+        if self._static is not None:
+            self._static.close()
 
     def __enter__(self) -> "AssetSyncClient":
         return self
@@ -52,21 +68,77 @@ class AssetSyncClient:
     # ------------------------------------------------------------ 服务端 API
 
     def list_versions(self) -> Dict[str, Any]:
+        if self.mode == "static":
+            return self._static.index()
         return self._http.json("GET", "/versions")
 
     def get_version(self, version: str = "latest", prerelease: bool = False) -> Dict[str, Any]:
+        if self.mode == "static":
+            return version_from_index(self._static.index(), version, prerelease)
         return self._http.json("GET", "/versions/%s%s" % (quote(version, safe=""), "?prerelease=1" if prerelease else ""))
 
     def diff(self, from_: str, to: str = "latest") -> Dict[str, Any]:
+        if self.mode == "static":
+            return diff_manifests(self.fetch_manifest(from_), self.fetch_manifest(to))
         return self._http.json("GET", "/versions/%s/diff?from=%s" % (quote(to, safe=""), quote(from_, safe="")))
 
     def fetch_manifest_raw(self, version: str = "latest", prerelease: bool = False):
+        if self.mode == "static":
+            vi = self.get_version(version, prerelease)
+            return vi["version"], self._static.get_buffer("versions/%s/manifest.json.gz" % vi["version"])
         body, headers = self._http.buffer(
             "GET", "/versions/%s/manifest%s" % (quote(version, safe=""), "?prerelease=1" if prerelease else ""))
         return headers.get("X-AssetSync-Version"), body
 
     def fetch_manifest(self, version: str = "latest", prerelease: bool = False) -> Manifest:
         return parse_manifest(self.fetch_manifest_raw(version, prerelease)[1])
+
+    def fetch_chunks(self, hashes, size_of, on_chunk, stats, cancel) -> None:
+        """取一批块，每块解码校验后回调 on_chunk(hash, raw)。动态批量 / 静态逐块。"""
+        if self.mode == "static":
+            self._static.fetch_chunks(hashes, on_chunk, stats, cancel)
+            return
+        batches = []
+        cur = []
+        cur_bytes = 0
+        for h in hashes:
+            cur.append(h)
+            cur_bytes += size_of(h)
+            if cur_bytes >= self.batch_bytes or len(cur) >= self.batch_chunks:
+                batches.append(cur)
+                cur, cur_bytes = [], 0
+        if cur:
+            batches.append(cur)
+        run_pool(batches, self.concurrency, lambda b: self._api_fetch_batch(b, on_chunk, stats, cancel))
+
+    def _api_fetch_batch(self, batch, on_chunk, stats, cancel) -> None:
+        pending = set(batch)
+        http = self._http
+
+        def attempt(_n: int) -> None:
+            body = b"".join(bytes.fromhex(h) for h in pending)
+            resp = http.request("POST", "/chunks/fetch", body, {"Content-Type": "application/octet-stream"})
+            ok = False
+            try:
+                for h, enc, raw_len, payload in iter_frames(resp):
+                    if cancel is not None and cancel.is_set():
+                        raise AssetSyncError("sync cancelled", code="ECANCELED")
+                    if h not in pending:
+                        raise AssetSyncError("server sent unexpected chunk %s" % h)
+                    raw = decode_chunk(h, enc, raw_len, payload)
+                    with stats.lock:
+                        stats.downloaded_wire += len(payload) + 41
+                        stats.downloaded_raw += len(raw)
+                    on_chunk(h, raw)
+                    pending.discard(h)
+                ok = True
+            finally:
+                if not ok:
+                    http.drop_conn()
+            if pending:
+                raise AssetSyncError("server stream ended with %d chunk(s) missing" % len(pending), code="ETRUNCATED")
+
+        http.with_retry(attempt, cancel)
 
     # ------------------------------------------------------------ 同步
 

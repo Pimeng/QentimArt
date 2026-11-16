@@ -11,7 +11,7 @@ from typing import Any, Callable, Dict, List, Optional, Set
 from ._errors import AssetSyncError
 from ._localfs import RandomAccessFile, mtime_ms, prune_empty_dirs, replace_retry, run_pool
 from ._plan import Plan, SourceIndex, WriteTask
-from ._wire import STATE_DIR, decode_chunk, iter_frames
+from ._wire import STATE_DIR
 from ._state import TMP_DIR
 
 
@@ -140,19 +140,15 @@ def _apply_wave(client, root, policy, wave, tmps, handles, sources, stats, new_t
             if r is not None:
                 r.close()
 
-    # 2) 以并行批次拉取其余的块
-    batches: List[List[str]] = []
-    cur: List[str] = []
-    cur_bytes = 0
-    for h in remaining:
-        cur.append(h)
-        cur_bytes += need[h].size
-        if cur_bytes >= client.batch_bytes or len(cur) >= client.batch_chunks:
-            batches.append(cur)
-            cur, cur_bytes = [], 0
-    if cur:
-        batches.append(cur)
-    run_pool(batches, client.concurrency, lambda b: _fetch_batch(client, b, need, write_chunk, stats, cancel))
+    # 2) 获取其余的块（动态模式批量拉帧流，静态模式逐块 GET，由 client 决定）
+    if remaining:
+        client.fetch_chunks(
+            hashes=remaining,
+            size_of=lambda h: need[h].size,
+            on_chunk=lambda h, raw: write_chunk(need[h], raw),
+            stats=stats,
+            cancel=cancel,
+        )
 
     # 3) 关闭文件、移动到目标位置、记录状态
     for i in range(len(handles)):
@@ -191,36 +187,6 @@ def _ensure_parent(root: str, rel: str, delete_set: Set[str], policy: str) -> No
             os.remove(ap)
             delete_set.discard(p)
     os.makedirs(os.path.join(root, parent), exist_ok=True)
-
-
-def _fetch_batch(client: Any, batch: List[str], need: Dict[str, _Need], write_chunk, stats: Stats,
-                 cancel: Optional[threading.Event]) -> None:
-    pending = set(batch)
-    http = client._http
-
-    def attempt(_n: int) -> None:
-        body = b"".join(bytes.fromhex(h) for h in pending)
-        resp = http.request("POST", "/chunks/fetch", body, {"Content-Type": "application/octet-stream"})
-        ok = False
-        try:
-            for h, enc, raw_len, payload in iter_frames(resp):
-                _check_cancel(cancel)
-                if h not in pending:
-                    raise AssetSyncError("server sent unexpected chunk %s" % h)
-                raw = decode_chunk(h, enc, raw_len, payload)
-                with stats.lock:
-                    stats.downloaded_wire += len(payload) + 41
-                    stats.downloaded_raw += len(raw)
-                write_chunk(need[h], raw)
-                pending.discard(h)
-            ok = True
-        finally:
-            if not ok:
-                http.drop_conn()
-        if pending:
-            raise AssetSyncError("server stream ended with %d chunk(s) missing" % len(pending), code="ETRUNCATED")
-
-    http.with_retry(attempt, cancel)
 
 
 def delete_files(root: str, paths: List[str]) -> None:

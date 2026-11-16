@@ -25,11 +25,25 @@ with AssetSyncClient("http://assets.internal:8080", "mygame", token="<read token
 
 完整示例见 [examples/plugin_example.py](examples/plugin_example.py)。
 
+## 静态模式（无需服务端）
+
+素材发布成静态树托管在对象存储 / CDN / Cloudflare Pages 上时，只需传 `base_url`，不需要 server/token，全程只读：
+
+```python
+from assetsync import AssetSyncClient
+with AssetSyncClient(base_url="https://mygame.pages.dev") as client:
+    client.sync("./assets")
+    client.sync("./assets", version="1.0.0")
+```
+
+`sync` / `plan` / `status` / `verify` / `diff` / `storage_report` 用法与动态模式一致。
+
 ## API
 
 | 方法 | 说明 |
 |---|---|
-| `AssetSyncClient(server, project, token=None, concurrency=8)` | 创建客户端（支持 `with`） |
+| `AssetSyncClient(server, project, token=None, concurrency=8)` | 创建动态客户端（支持 `with`） |
+| `AssetSyncClient(base_url=..., concurrency=8)` | 创建静态客户端（只读，无需鉴权） |
 | `list_versions()` / `get_version(v="latest")` / `diff(from_, to)` | 查询服务器上的版本 |
 | `sync(dir, **opts)` | 同步到指定版本（默认最新版） |
 | `plan(dir, **opts)` | 预演，返回预计写入/删除的文件和下载量 |

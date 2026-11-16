@@ -1,19 +1,75 @@
 import path from 'node:path';
 import { HttpClient, AssetSyncError } from './http.js';
-import { parseManifest, STATE_DIR } from './manifest.js';
+import { StaticTransport } from './static.js';
+import { parseManifest, diffManifests, STATE_DIR } from './manifest.js';
+import { parseFrames, decodeFrame } from './frames.js';
 import { runSync, runStatus, runVerify, SyncConflictError } from './sync.js';
 import { dirBytes, scanDir } from './localfs.js';
 
 export { AssetSyncError, SyncConflictError, STATE_DIR };
 
+/** 从 index.json 中按请求的 version（可为 "latest"）解析出版本元数据。 */
+function versionFromIndex(idx, version, prerelease) {
+  let v = version;
+  if (version === 'latest') v = prerelease ? idx.latestPrerelease : idx.latest;
+  if (!v) throw new AssetSyncError('project has no versions');
+  const hit = (idx.versions || []).find((x) => x.version === v);
+  if (!hit) throw new AssetSyncError(`version ${v} not found`, { status: 404 });
+  return hit;
+}
+
+/** 动态模式：按字节/数量分批 POST /chunks/fetch，并行拉取帧流。 */
+async function apiFetchChunks(client, { hashes, sizeOf, onChunk, stats, signal }) {
+  const batches = [];
+  let cur = [];
+  let curBytes = 0;
+  for (const h of hashes) {
+    cur.push(h);
+    curBytes += sizeOf(h);
+    if (curBytes >= client.batchBytes || cur.length >= client.batchChunks) {
+      batches.push(cur);
+      cur = [];
+      curBytes = 0;
+    }
+  }
+  if (cur.length) batches.push(cur);
+
+  const runBatch = (batch) => {
+    const pending = new Set(batch);
+    return client.http.withRetry(async () => {
+      const body = Buffer.concat([...pending].map((h) => Buffer.from(h, 'hex')));
+      const res = await client.http.raw('POST', '/chunks/fetch', { body, headers: { 'content-type': 'application/octet-stream' }, signal });
+      for await (const f of parseFrames(res)) {
+        if (!pending.has(f.hash)) throw new AssetSyncError(`server sent unexpected chunk ${f.hash}`);
+        const raw = await decodeFrame(f);
+        stats.downloadedWire += f.payload.length + 41;
+        stats.downloadedRaw += raw.length;
+        await onChunk(f.hash, raw);
+        pending.delete(f.hash);
+      }
+      if (pending.size) throw new AssetSyncError(`server stream ended with ${pending.size} chunk(s) missing`, { code: 'ETRUNCATED' });
+    }, signal);
+  };
+
+  let i = 0;
+  await Promise.all(
+    Array.from({ length: Math.max(1, Math.min(client.concurrency, batches.length)) }, async () => {
+      while (i < batches.length) {
+        const b = batches[i++];
+        await runBatch(b);
+      }
+    }),
+  );
+}
+
 /**
- * 下游 AssetSync 客户端。
- *
- *   const client = new AssetSyncClient({ server, project, token });
- *   const result = await client.sync('./Assets', { onProgress });
+ * 下游 AssetSync 客户端。两种模式：
+ *   动态：new AssetSyncClient({ server, project, token })  —— 走服务端 HTTP API
+ *   静态：new AssetSyncClient({ baseUrl })                 —— 从公开静态树只读拉取，无需鉴权
  */
 export class AssetSyncClient {
   constructor({
+    baseUrl,
     server,
     project,
     token,
@@ -25,38 +81,54 @@ export class AssetSyncClient {
     timeoutMs = 60000,
     retries = 3,
   } = {}) {
-    if (!server || !project) throw new AssetSyncError('server and project are required');
-    this.project = project;
     this.concurrency = concurrency;
     this.batchBytes = batchBytes;
     this.batchChunks = batchChunks;
     this.waveBytes = waveBytes;
     this.waveFiles = waveFiles;
-    this.http = new HttpClient({ server, project, token, concurrency, timeoutMs, retries });
+    if (baseUrl) {
+      this.mode = 'static';
+      this.project = project ?? null;
+      this.static = new StaticTransport({ baseUrl, concurrency, timeoutMs, retries });
+    } else {
+      if (!server || !project) throw new AssetSyncError('server and project are required (or pass baseUrl for static mode)');
+      this.mode = 'api';
+      this.project = project;
+      this.http = new HttpClient({ server, project, token, concurrency, timeoutMs, retries });
+    }
   }
 
-  /** 释放连接池中的连接。 */
+  /** 释放连接池。 */
   close() {
-    this.http.close();
+    this.http?.close();
+    this.static?.close();
   }
 
-  /** 列出所有版本（最新的在前），以及 `latest` / `latestPrerelease`。 */
+  /** 列出版本（新到旧）以及 latest / latestPrerelease。 */
   listVersions() {
+    if (this.mode === 'static') return this.static.index();
     return this.http.json('GET', '/versions');
   }
 
-  /** 获取版本元数据；`version` 可以是 "latest"。 */
-  getVersion(version = 'latest', { prerelease = false } = {}) {
+  /** 版本元数据；version 可为 "latest"。 */
+  async getVersion(version = 'latest', { prerelease = false } = {}) {
+    if (this.mode === 'static') return versionFromIndex(await this.static.index(), version, prerelease);
     return this.http.json('GET', `/versions/${encodeURIComponent(version)}${prerelease ? '?prerelease=1' : ''}`);
   }
 
-  /** 服务端计算的两个版本之间的差异（文件列表 + 新增 chunk 字节数）。 */
-  diff(from, to = 'latest') {
+  /** 两个版本之间的差异（文件列表 + 需新下载的字节）。 */
+  async diff(from, to = 'latest') {
+    if (this.mode === 'static') return diffManifests(await this.fetchManifest(from), await this.fetchManifest(to));
     return this.http.json('GET', `/versions/${encodeURIComponent(to)}/diff?from=${encodeURIComponent(from)}`);
   }
 
-  /** 下载 manifest（gzip 字节）及其解析到的版本号。 */
+  /** 下载 manifest（gzip 字节）以及解析到的版本号。 */
   async fetchManifestRaw(version = 'latest', { prerelease = false } = {}) {
+    if (this.mode === 'static') {
+      const vi = await this.getVersion(version, { prerelease });
+      const gz = await this.static.getBuffer(`versions/${vi.version}/manifest.json.gz`);
+      return { version: vi.version, gz };
+    }
     const { body, headers } = await this.http.buffer('GET', `/versions/${encodeURIComponent(version)}/manifest${prerelease ? '?prerelease=1' : ''}`);
     return { version: headers['x-assetsync-version'], gz: body };
   }
@@ -67,38 +139,37 @@ export class AssetSyncClient {
     return parseManifest(gz);
   }
 
+  /** 内部：取一批块，每块解码校验后回调 onChunk(hash, raw)。 */
+  fetchChunks(args) {
+    if (this.mode === 'static') return this.static.fetchChunks(args);
+    return apiFetchChunks(this, args);
+  }
+
   /**
-   * 将 `dir` 同步到指定版本。
+   * 把 dir 同步到某个版本。
    * @param {string} dir
-   * @param {object} [opts]
-   * @param {string} [opts.version='latest']
-   * @param {'overwrite'|'keep'|'fail'} [opts.localChanges='overwrite']
-   * @param {boolean} [opts.prerelease=false]  允许 "latest" 解析到预发布版本
-   * @param {boolean} [opts.verifyAll=false]   对每个本地文件计算哈希，而不是信任 size+mtime
-   * @param {boolean} [opts.dryRun=false]      仅计算同步计划
-   * @param {(p:object)=>void} [opts.onProgress]
-   * @param {AbortSignal} [opts.signal]
+   * @param {object} [opts] 见 index.d.ts 的 SyncOptions
    */
   sync(dir, opts = {}) {
     return runSync(this, dir, opts);
   }
 
-  /** 试运行：sync() 将会执行哪些操作？ */
+  /** 预演：sync() 会做什么？ */
   plan(dir, opts = {}) {
     return runSync(this, dir, { ...opts, dryRun: true });
   }
 
-  /** 本地状态与上次同步版本的对比（不访问网络）。 */
+  /** 相对上次同步版本的本地状态（无网络）。 */
   status(dir) {
     return runStatus(dir, this.project);
   }
 
-  /** 重新计算当前版本中每个文件的哈希。 */
+  /** 重新计算当前版本每个文件的哈希。 */
   verify(dir, onProgress) {
     return runVerify(dir, onProgress);
   }
 
-  /** 资产字节数与 AssetSync 额外开销（`.assetsync` 目录）的对比。 */
+  /** 素材字节 vs. AssetSync 开销（.assetsync 目录）。 */
   static async storageReport(dir) {
     dir = path.resolve(dir);
     const { files } = await scanDir(dir);

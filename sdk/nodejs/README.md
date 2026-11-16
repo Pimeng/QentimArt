@@ -32,11 +32,24 @@ client.close();
 
 完整示例（检查更新 → 预估下载量 → 同步 → 处理冲突）见 [examples/plugin-example.mjs](examples/plugin-example.mjs)。
 
+## 静态模式（无需服务端）
+
+如果素材发布成了静态树并托管在对象存储 / CDN / Cloudflare Pages 上（见根目录 README 的静态模式），只需传 `baseUrl`，不需要 server/token，全程只读：
+
+```js
+const client = new AssetSyncClient({ baseUrl: 'https://mygame.pages.dev' });
+await client.sync('./assets');                     // 和动态模式用法完全一致
+await client.sync('./assets', { version: '1.0.0' });
+```
+
+`sync` / `plan` / `status` / `verify` / `diff` / `storageReport` 用法与动态模式相同。
+
 ## API
 
 | 方法 | 说明 |
 |---|---|
-| `new AssetSyncClient({ server, project, token, concurrency=8 })` | 创建客户端 |
+| `new AssetSyncClient({ server, project, token, concurrency=8 })` | 创建动态客户端 |
+| `new AssetSyncClient({ baseUrl, concurrency=8 })` | 创建静态客户端（只读，无需鉴权） |
 | `listVersions()` | 版本列表（新→旧）以及 `latest` |
 | `getVersion(v='latest', { prerelease })` | 版本元数据 |
 | `diff(from, to='latest')` | 服务端计算的版本差异 |

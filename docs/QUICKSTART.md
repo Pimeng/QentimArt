@@ -7,6 +7,7 @@
 - [2. 发布版本](#2-发布版本)
 - [3. 下游接入](#3-下游接入)
 - [4. 运维命令](#4-运维命令)
+- [5. 静态模式 / Cloudflare Pages](#5-静态模式--cloudflare-pages)
 - [运行测试](#运行测试)
 
 ## 环境要求
@@ -185,6 +186,91 @@ bin/assetsync delete-version -version 1.0.0       # 删除版本（需要 admin�
 ```bash
 bin/assetsync gc                                  # 回收不再被任何版本引用的块（需要 admin，可加 -dry-run）
 ```
+
+## 5. 静态模式 / Cloudflare Pages
+
+静态模式**不需要运行任何服务端**：发布端把素材构建成一棵自包含的静态树（本地目录），用 `wrangler` / `rsync` / S3 sync 部署到任意静态托管；下游客户端只用一个公开的 `index.json` 地址即可差异化更新，全程只有 `GET`、默认不需要鉴权。
+
+```
+assetsync publish --static  ──▶  静态树目录  ──wrangler/rsync──▶  Cloudflare Pages / CDN  ──GET──▶  SDK (baseUrl)
+```
+
+### 构建静态树
+
+输出目录是**持久镜像**：每次发布读取其中已有的块、只写新块、追加版本并重建 `index.json`。请在多次发布之间保留这个目录。
+
+```bash
+assetsync publish --static -o ./site -project mygame -version 1.0.0 ./Assets
+```
+
+```bash
+assetsync publish --static -o ./site -project mygame -version 1.1.0 ./Assets
+```
+
+生成的目录结构：
+
+```
+site/
+  _headers                        缓存策略（index.json 短 TTL，其余 immutable）
+  index.json                      版本索引 + latest / latestPrerelease
+  versions/<v>/manifest.json.gz
+  versions/<v>/meta.json
+  chunks/<哈希前两位>/<哈希>
+```
+
+### 部署到 Cloudflare Pages
+
+```bash
+npx wrangler pages deploy ./site
+```
+
+Cloudflare Pages 每次部署是整站快照，但 `wrangler` 按文件哈希去重上传，所以未变化的块不会重传。`_headers` 会被 Pages 读取，自动对不可变对象永久缓存、对 `index.json` 用短 TTL。
+
+> **文件数上限**：Cloudflare Pages 免费版单站点最多 20,000 个文件（付费版 100,000）。每个块是一个文件，默认平均块 1 MiB；大项目叠加历史版本可能逼近上限。可用更大的平均块缓解（文件数约降 4 倍，仍远低于 25 MiB 单文件上限）：
+>
+> ```bash
+> assetsync publish --static -o ./site -chunk-avg 4194304 -chunk-max 16777216 -version 1.0.0 ./Assets
+> ```
+
+### 下游拉取
+
+Node.js：
+
+```js
+import { AssetSyncClient } from '@assetsync/sdk';
+const client = new AssetSyncClient({ baseUrl: 'https://mygame.pages.dev' });
+await client.sync('./assets');
+```
+
+Python：
+
+```python
+from assetsync import AssetSyncClient
+with AssetSyncClient(base_url="https://mygame.pages.dev") as client:
+    client.sync("./assets")
+```
+
+命令行：
+
+```bash
+npx assetsync-node sync --base-url https://mygame.pages.dev --dir ./assets
+```
+
+```bash
+assetsync-py sync --base-url https://mygame.pages.dev --dir ./assets
+```
+
+### 静态树的运维
+
+```bash
+assetsync delete-version --static -o ./site -version 1.0.0   # 删除某版本（随后 gc 清孤块）
+```
+
+```bash
+assetsync gc --static -o ./site                              # 回收不再被引用的块（可加 -dry-run）
+```
+
+清理后重新 `wrangler pages deploy ./site` 即可。
 
 ## 运行测试
 

@@ -127,17 +127,15 @@ func scan(dir string, excludes []string) ([]fileJob, error) {
 	return out, err
 }
 
-// Run 把 opts.Dir 发布为 opts.Version 版本。
-func Run(ctx context.Context, c *Client, opts Options) (*Result, error) {
-	start := time.Now()
+func (opts *Options) normalize() error {
 	if _, err := semver.Parse(opts.Version); err != nil {
-		return nil, err
+		return err
 	}
 	if opts.Params == (cdc.Params{}) {
 		opts.Params = cdc.Default
 	}
 	if err := opts.Params.Validate(); err != nil {
-		return nil, err
+		return err
 	}
 	if opts.Concurrency <= 0 {
 		opts.Concurrency = 8
@@ -145,7 +143,21 @@ func Run(ctx context.Context, c *Client, opts Options) (*Result, error) {
 	if opts.Compress == "" {
 		opts.Compress = "auto"
 	}
+	return nil
+}
 
+// chunkResult 是分块阶段的产物，HTTP 与静态两条发布路径共用。
+type chunkResult struct {
+	files   []fileJob
+	locs    map[wire.Hash]chunkLoc
+	total   int64
+	m       *manifest.Manifest
+	scanDur time.Duration
+}
+
+// chunkTree 扫描 opts.Dir，并行做 FastCDC 分块 + SHA-256，构建 manifest。
+func chunkTree(opts Options) (*chunkResult, error) {
+	start := time.Now()
 	files, err := scan(opts.Dir, opts.Excludes)
 	if err != nil {
 		return nil, fmt.Errorf("scan: %w", err)
@@ -156,7 +168,6 @@ func Run(ctx context.Context, c *Client, opts Options) (*Result, error) {
 	}
 	opts.logf("scanned %d files (%s), chunking with %d workers...", len(files), human(total), runtime.NumCPU())
 
-	// ---- 并行分块并计算哈希 ----
 	entries := make([]manifest.File, len(files))
 	locs := make(map[wire.Hash]chunkLoc)
 	var locMu sync.Mutex
@@ -213,14 +224,27 @@ func Run(ctx context.Context, c *Client, opts Options) (*Result, error) {
 		return nil, err
 	default:
 	}
-	res := &Result{Version: opts.Version, Files: len(files), TotalBytes: total, Chunks: len(locs), ScanDuration: time.Since(start)}
-	opts.logf("chunked in %s: %d unique chunks", res.ScanDuration.Round(time.Millisecond), len(locs))
-
+	dur := time.Since(start)
+	opts.logf("chunked in %s: %d unique chunks", dur.Round(time.Millisecond), len(locs))
 	m := &manifest.Manifest{Version: opts.Version, CreatedAt: time.Now(), Files: entries}
 	if err := m.Validate(); err != nil {
 		return nil, err
 	}
+	return &chunkResult{files: files, locs: locs, total: total, m: m, scanDur: dur}, nil
+}
 
+// Run 把 opts.Dir 通过 HTTP 发布到动态服务端。
+func Run(ctx context.Context, c *Client, opts Options) (*Result, error) {
+	start := time.Now()
+	if err := opts.normalize(); err != nil {
+		return nil, err
+	}
+	ck, err := chunkTree(opts)
+	if err != nil {
+		return nil, err
+	}
+	files, locs, total, m := ck.files, ck.locs, ck.total, ck.m
+	res := &Result{Version: opts.Version, Files: len(files), TotalBytes: total, Chunks: len(locs), ScanDuration: ck.scanDur}
 	// ---- 查找缺失的块 ----
 	all := make([]wire.Hash, 0, len(locs))
 	for h := range locs {

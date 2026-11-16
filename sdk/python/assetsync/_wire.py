@@ -70,6 +70,15 @@ def decode_chunk(hash_hex: str, enc: int, raw_len: int, payload: bytes) -> bytes
     return raw
 
 
+def decode_blob(hash_hex: str, buf: bytes) -> bytes:
+    """解码一个静态 blob 对象（enc u8 | rawLen u32be | payload），校验哈希。"""
+    if len(buf) < 5:
+        raise AssetSyncError("chunk %s: blob too short" % hash_hex, code="ECORRUPT")
+    enc = buf[0]
+    raw_len = int.from_bytes(buf[1:5], "big")
+    return decode_chunk(hash_hex, enc, raw_len, buf[5:])
+
+
 class Chunk(NamedTuple):
     hash: str
     size: int
@@ -101,6 +110,37 @@ def validate_path(p: str) -> None:
     for s in segs:
         if not s or s in (".", "..") or _DRIVE.match(s):
             raise AssetSyncError("unsafe path %r" % p)
+
+
+def diff_manifests(a: "Manifest", b: "Manifest") -> dict:
+    """在客户端比较两份 manifest（静态模式没有服务端 /diff 接口时使用）。"""
+    added, modified, removed = [], [], []
+    for p, f in b.files.items():
+        o = a.files.get(p)
+        if o is None:
+            added.append(p)
+        elif o.hash != f.hash:
+            modified.append(p)
+    for p in a.files:
+        if p not in b.files:
+            removed.append(p)
+    have = set()
+    for f in a.files.values():
+        for c in f.chunks:
+            have.add(c.hash)
+    download = 0
+    total = 0
+    seen = set()
+    for f in b.files.values():
+        total += f.size
+        for c in f.chunks:
+            if c.hash in seen:
+                continue
+            seen.add(c.hash)
+            if c.hash not in have:
+                download += c.size
+    return {"from": a.version, "to": b.version, "added": sorted(added), "modified": sorted(modified),
+            "removed": sorted(removed), "downloadBytes": download, "totalBytes": total}
 
 
 def parse_manifest(gz: bytes) -> Manifest:

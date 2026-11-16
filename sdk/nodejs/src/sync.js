@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { AssetSyncError } from './http.js';
-import { parseFrames, decodeFrame, sha256hex } from './frames.js';
+import { sha256hex } from './frames.js';
 import { parseManifest, STATE_DIR } from './manifest.js';
 import { pool, scanDir, hashFile, writeFileAtomic, renameRetry, pruneEmptyDirs } from './localfs.js';
 
@@ -432,21 +432,16 @@ async function applyWave(client, dir, opts, tasks, sources, stats, newTracked, w
     });
     for (const r of readers.values()) (await r)?.close().catch(() => {});
 
-    // 2) 以并行批次从服务器获取其余 chunk
-    const batches = [];
-    let cur = [];
-    let curBytes = 0;
-    for (const h of remaining) {
-      cur.push(h);
-      curBytes += need.get(h).size;
-      if (curBytes >= client.batchBytes || cur.length >= client.batchChunks) {
-        batches.push(cur);
-        cur = [];
-        curBytes = 0;
-      }
+    // 2) 获取其余 chunk（动态模式批量拉帧流，静态模式逐块 GET，由 client 决定）
+    if (remaining.length) {
+      await client.fetchChunks({
+        hashes: remaining,
+        sizeOf: (h) => need.get(h).size,
+        onChunk: (h, raw) => writeChunk(need.get(h), raw),
+        stats,
+        signal: opts.signal,
+      });
     }
-    if (cur.length) batches.push(cur);
-    await pool(batches, client.concurrency, (batch) => fetchBatch(client, batch, need, writeChunk, stats, opts.signal));
 
     // 3) 关闭文件、移动到目标位置、记录状态
     await pool(tasks, 32, async (task) => {
@@ -490,24 +485,6 @@ async function ensureParent(dir, rel, deleteSet, policy) {
     }
   }
   await fs.mkdir(path.join(dir, parent), { recursive: true });
-}
-
-async function fetchBatch(client, batch, need, writeChunk, stats, signal) {
-  const pending = new Set(batch);
-  await client.http.withRetry(async () => {
-    const want = [...pending];
-    const body = Buffer.concat(want.map((h) => Buffer.from(h, 'hex')));
-    const res = await client.http.raw('POST', '/chunks/fetch', { body, headers: { 'content-type': 'application/octet-stream' }, signal });
-    for await (const f of parseFrames(res)) {
-      if (!pending.has(f.hash)) throw new AssetSyncError(`server sent unexpected chunk ${f.hash}`);
-      const raw = await decodeFrame(f);
-      stats.downloadedWire += f.payload.length + 41;
-      stats.downloadedRaw += raw.length;
-      await writeChunk(need.get(f.hash), raw);
-      pending.delete(f.hash);
-    }
-    if (pending.size) throw new AssetSyncError(`server stream ended with ${pending.size} chunk(s) missing`, { code: 'ETRUNCATED' });
-  }, signal);
 }
 
 // ---------------------------------------------------------------- 状态查询

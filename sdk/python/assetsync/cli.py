@@ -25,6 +25,7 @@ def main(argv=None) -> int:
     p.add_argument("--server", default=os.environ.get("ASSETSYNC_SERVER"))
     p.add_argument("--project", default=os.environ.get("ASSETSYNC_PROJECT"))
     p.add_argument("--token", default=os.environ.get("ASSETSYNC_TOKEN"))
+    p.add_argument("--base-url", default=os.environ.get("ASSETSYNC_BASE_URL"), help="静态模式：公开静态树根地址（只读，无需鉴权）")
     p.add_argument("--dir")
     p.add_argument("--version", default="latest")
     p.add_argument("--local-changes", default="overwrite", choices=["overwrite", "keep", "fail"])
@@ -49,7 +50,11 @@ def main(argv=None) -> int:
             r = AssetSyncClient.storage_report(need("dir"))
             out(r, "assets %s, overhead %s, ratio %.3f%%" % (_fmt(r["asset_bytes"]), _fmt(r["overhead_bytes"]), r["ratio"] * 100))
             return 0
-        with AssetSyncClient(need("server"), need("project"), token=a.token, concurrency=a.concurrency) as c:
+        if a.base_url:
+            client = AssetSyncClient(base_url=a.base_url, project=a.project, concurrency=a.concurrency)
+        else:
+            client = AssetSyncClient(need("server"), need("project"), token=a.token, concurrency=a.concurrency)
+        with client as c:
             if a.command == "versions":
                 v = c.list_versions()
                 lines = ["%s %-16s %10s  +%-10s %d files  %s" % ("*" if x["version"] == v.get("latest") else " ", x["version"],

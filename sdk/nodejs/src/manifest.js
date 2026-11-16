@@ -35,6 +35,36 @@ export function parseManifest(gz) {
   return { version: doc.version, createdAt: doc.createdAt, files };
 }
 
+/**
+ * 在客户端比较两份 manifest（静态模式没有服务端的 /diff 接口时使用）。
+ * downloadBytes 为 b 中不在 a 里的块的原始字节数。
+ */
+export function diffManifests(a, b) {
+  const added = [];
+  const modified = [];
+  const removed = [];
+  for (const [p, f] of b.files) {
+    const o = a.files.get(p);
+    if (!o) added.push(p);
+    else if (o.hash !== f.hash) modified.push(p);
+  }
+  for (const p of a.files.keys()) if (!b.files.has(p)) removed.push(p);
+  const have = new Set();
+  for (const f of a.files.values()) for (const c of f.chunks) have.add(c.hash);
+  let downloadBytes = 0;
+  let totalBytes = 0;
+  const seen = new Set();
+  for (const f of b.files.values()) {
+    totalBytes += f.size;
+    for (const c of f.chunks) {
+      if (seen.has(c.hash)) continue;
+      seen.add(c.hash);
+      if (!have.has(c.hash)) downloadBytes += c.size;
+    }
+  }
+  return { from: a.version, to: b.version, added: added.sort(), modified: modified.sort(), removed: removed.sort(), downloadBytes, totalBytes };
+}
+
 export function validatePath(p) {
   if (typeof p !== 'string' || !p || p.includes('\\') || p.includes('\0')) throw new AssetSyncError(`unsafe path ${JSON.stringify(p)}`);
   const segs = p.split('/');
