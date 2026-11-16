@@ -10,9 +10,10 @@
 ![Go](https://img.shields.io/badge/Go-%E2%89%A51.23-00ADD8?logo=go&logoColor=white)
 ![Node.js](https://img.shields.io/badge/Node.js-%E2%89%A518-339933?logo=nodedotjs&logoColor=white)
 ![Python](https://img.shields.io/badge/Python-%E2%89%A53.8-3776AB?logo=python&logoColor=white)
+![Java](https://img.shields.io/badge/Java-%E2%89%A521-ED8B00?logo=openjdk&logoColor=white)
 ![Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)
 
-[快速开始](docs/QUICKSTART.md) · [架构设计](docs/ARCHITECTURE.md) · [协议说明](docs/PROTOCOL.md) · [Node.js SDK](sdk/nodejs/README.md) · [Python SDK](sdk/python/README.md)
+[快速开始](docs/QUICKSTART.md) · [架构设计](docs/ARCHITECTURE.md) · [协议说明](docs/PROTOCOL.md) · [Node.js SDK](sdk/nodejs/README.md) · [Python SDK](sdk/python/README.md) · [Java SDK](sdk/java/README.md)
 
 </div>
 
@@ -39,14 +40,14 @@ QentimArt 换了一种做法：
 - **本地改动策略可配置**：`overwrite`（默认）/ `keep` / `fail`，首次同步不会误删未知文件。
 - **多项目 + Token 鉴权**：`read` / `publish` / `admin` 三种角色，可限定到具体项目。
 - **两种分发方案**：动态服务端（鉴权 + 批量拉取），或**零服务器静态分发**——把素材构建成静态树部署到 Cloudflare Pages / CDN / 对象存储，客户端只用一个公开 `index.json` 地址即可差异化更新，默认无需鉴权。
-- **零第三方依赖**：Go 单二进制服务端，存储可选本地磁盘或 S3 兼容存储（AWS S3 / MinIO / OSS / COS / R2）；Node.js 与 Python SDK 均无外部依赖。
+- **零第三方依赖**：Go 单二进制服务端，存储可选本地磁盘或 S3 兼容存储（AWS S3 / MinIO / OSS / COS / R2）；Node.js、Python 与 Java SDK 均无外部依赖。
 
 ## 工作原理
 
 ```
 ┌──────────────────┐  publish   ┌──────────────────────┐   sync    ┌─────────────────────┐
 │ CI / 发布机       │ ─────────▶ │ qentimart-server     │ ────────▶ │ 编辑器插件 / 工具    │
-│ qentimart (客户端)│  只传新块   │ 本地磁盘 或 S3        │  只拉差异  │ Node.js / Python SDK │
+│ qentimart (客户端)│  只传新块   │ 本地磁盘 或 S3        │  只拉差异  │ Node / Python / Java │
 └──────────────────┘            └──────────────────────┘           └─────────────────────┘
 ```
 
@@ -96,6 +97,7 @@ Windows 11，12 核，服务端与客户端在同一台机器，3 GB / 1.26 万�
 | [协议说明](docs/PROTOCOL.md) | HTTP 接口、块帧格式、清单格式、本地状态格式 |
 | [Node.js SDK](sdk/nodejs/README.md) | API、同步选项、命令行、插件接入示例 |
 | [Python SDK](sdk/python/README.md) | API、同步参数、命令行、示例 |
+| [Java SDK](sdk/java/README.md) | API、同步选项、命令行、构建（Gradle） |
 
 ## 项目结构
 
@@ -105,6 +107,7 @@ cmd/qentimart/         客户端（publish、versions、diff、gc 等）
 internal/              分块、清单、存储（本地 / S3）、HTTP 服务、发布流程
 sdk/nodejs/            Node.js SDK、命令行、插件接入示例
 sdk/python/            Python SDK、命令行、示例
+sdk/java/              Java SDK、命令行、Gradle 构建
 docs/                  快速开始、架构设计、协议说明
 examples/              服务端配置示例
 tests/                 端到端测试与吞吐基准
@@ -122,7 +125,7 @@ go test ./...
 node tests/e2e.mjs
 ```
 
-代码注释、文档请使用简体中文；新增协议字段或修改本地状态格式时，请同步更新 [协议说明](docs/PROTOCOL.md) 以及 Node.js、Python 两个 SDK。
+代码注释、文档请使用简体中文；新增协议字段或修改本地状态格式时，请同步更新 [协议说明](docs/PROTOCOL.md) 以及 Node.js、Python、Java 三个 SDK。
 
 ## 开源许可
 

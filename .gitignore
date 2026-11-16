@@ -6,5 +6,7 @@ node_modules/
 __pycache__/
 *.pyc
 *.egg-info/
+sdk/java/build/
+sdk/java/.gradle/
 .qentimart/
 server.local.json

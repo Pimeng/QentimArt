@@ -30,7 +30,7 @@ QentimArt 的做法：
 ## 数据流
 
 ```
-发布端 (Go CLI)                          服务器 (Go)                           下游插件 (Node / Python SDK)
+发布端 (Go CLI)                          服务器 (Go)                           下游插件 (Node / Python / Java SDK)
 ─────────────                            ──────────                            ─────────────────────────
 扫描目录 + 并行 FastCDC/SHA-256
 POST /chunks/missing  ───────────────▶  查询内存块索引
@@ -55,7 +55,7 @@ PUT /versions/1.2.3 (清单) ───────────▶  校验所有�
 | 并发 | 客户端多连接并行批次（默认 8），keep-alive 连接池；服务器每个批次内部并行读存储（本地 8 / S3 32） |
 | 传输量 | 块级去重；发布端对可压缩数据用 DEFLATE-1 压缩（已压缩格式如 png/ogg/zip 自动跳过）；下游优先本地复用 |
 | 磁盘 IO | 按偏移随机写入预分配的临时文件，块可以乱序到达；同一块被多个文件引用时只下载一次 |
-| CPU | SHA-256 走原生实现（Go / Node OpenSSL / Python hashlib，均支持 SHA-NI）；只有发布端做 CDC |
+| CPU | SHA-256 走原生实现（Go / Node OpenSSL / Python hashlib / Java MessageDigest，均支持 SHA-NI）；只有发布端做 CDC |
 | 本地检测 | 已同步过的文件用 size + mtime 判断，不重复哈希；只有可疑文件才计算哈希 |
 
 ## 110% 存储约束

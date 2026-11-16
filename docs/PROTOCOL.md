@@ -87,7 +87,7 @@ gzip 压缩的 JSON，文件按路径排序：
 <asset dir>/.qentimart/lock              防止并发同步
 ```
 
-`mtimeMs` 为整数毫秒（`floor(mtime)`）。Node 和 Python SDK 的状态格式相同，可以互相接管同一个目录。
+`mtimeMs` 为整数毫秒（`floor(mtime)`）。Node、Python 和 Java SDK 的状态格式相同，可以互相接管同一个目录。
 
 ## 静态分发树（方案 B）
 

@@ -17,6 +17,7 @@
 | 服务端 `qentimart-server` / 客户端 `qentimart` | Go ≥ 1.23（编译用；运行时均为无依赖的单二进制） |
 | Node.js SDK | Node.js ≥ 18，无第三方依赖 |
 | Python SDK | Python ≥ 3.8，仅使用标准库 |
+| Java SDK | JDK ≥ 21，仅使用标准库（Gradle 构建） |
 | 存储 | 本地磁盘，或任意 S3 兼容存储（AWS S3 / MinIO / 阿里云 OSS / 腾讯云 COS / Cloudflare R2） |
 
 ## 1. 编译并启动服务端
@@ -145,9 +146,27 @@ with QentimArtClient("http://127.0.0.1:8080", "mygame", token=token) as client:
 
 完整 API 见 [sdk/python/README.md](../sdk/python/README.md)。
 
+### Java
+
+```bash
+cd sdk/java && ./gradlew build
+```
+
+```java
+import qentimart.QentimArtClient;
+import qentimart.SyncOptions;
+
+try (QentimArtClient client = new QentimArtClient("http://127.0.0.1:8080", "mygame", token)) {
+    client.sync("./assets");                                   // 默认同步到最新正式版
+    client.sync("./assets", new SyncOptions().version("1.1.0")); // 切换（升级或降级）到指定版本
+}
+```
+
+完整 API 与构建说明见 [sdk/java/README.md](../sdk/java/README.md)。
+
 ### 命令行
 
-两个 SDK 都自带命令行工具，适合脚本或手动操作：
+三个 SDK 都自带命令行工具，适合脚本或手动操作：
 
 ```bash
 npx qentimart-node sync --server http://127.0.0.1:8080 --project mygame --token <read token> --dir ./assets
@@ -155,6 +174,10 @@ npx qentimart-node sync --server http://127.0.0.1:8080 --project mygame --token 
 
 ```bash
 qentimart-py sync --server http://127.0.0.1:8080 --project mygame --token <read token> --dir ./assets
+```
+
+```bash
+java -jar sdk/java/build/libs/qentimart-sdk-0.1.0.jar sync --server http://127.0.0.1:8080 --project mygame --token <read token> --dir ./assets
 ```
 
 ### 本地改动的处理
@@ -250,6 +273,15 @@ with QentimArtClient(base_url="https://mygame.pages.dev") as client:
     client.sync("./assets")
 ```
 
+Java：
+
+```java
+import qentimart.QentimArtClient;
+try (QentimArtClient client = QentimArtClient.staticClient("https://mygame.pages.dev")) {
+    client.sync("./assets");
+}
+```
+
 命令行：
 
 ```bash
@@ -258,6 +290,10 @@ npx qentimart-node sync --base-url https://mygame.pages.dev --dir ./assets
 
 ```bash
 qentimart-py sync --base-url https://mygame.pages.dev --dir ./assets
+```
+
+```bash
+java -jar sdk/java/build/libs/qentimart-sdk-0.1.0.jar sync --base-url https://mygame.pages.dev --dir ./assets
 ```
 
 ### 静态树的运维
@@ -280,7 +316,7 @@ qentimart gc --static -o ./site                              # 回收不再被�
 go test ./...
 ```
 
-端到端测试（自动编译服务端、生成素材、发布两个版本，再用两个 SDK 做全部检查）：
+端到端测试（自动编译服务端、生成素材、发布两个版本，再用各 SDK 做全部检查）：
 
 ```bash
 node tests/e2e.mjs
@@ -288,6 +324,7 @@ node tests/e2e.mjs
 
 - 默认生成约 400 MiB 素材，`E2E_SIZE_MB=4000` 可以做更大规模的压测。
 - `E2E_SKIP_PYTHON=1` 跳过 Python SDK 的检查。
+- `E2E_SKIP_JAVA=1` 跳过 Java SDK 的检查；未安装 JDK ≥ 21 时自动跳过（用 `JAVA_HOME` 指定 JDK，测试用 `javac` 直接编译，无需本机 Gradle）。
 - 测试数据写在 `tests/.work/`（已在 `.gitignore` 中忽略），跑完可以删除。
 
 只测网络 + 解码 + 校验、不写磁盘的吞吐（用来区分网络瓶颈和磁盘瓶颈）：

@@ -5,6 +5,7 @@
 //   node tests/e2e.mjs                 # 生成约 400 MiB 的资产
 //   E2E_SIZE_MB=4000 node tests/e2e.mjs
 //   E2E_SKIP_PYTHON=1 node tests/e2e.mjs
+//   E2E_SKIP_JAVA=1 node tests/e2e.mjs
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import fs from 'node:fs/promises';
@@ -32,6 +33,52 @@ const check = (cond, msg) => {
   console.log(`${cond ? '  ok  ' : '  FAIL'} ${msg}`);
   if (!cond) failures++;
 };
+
+// ------------------------------------------------------------ Java SDK 辅助
+
+const JAVA_HOME = process.env.JAVA_HOME;
+const javaBin = (name) => {
+  const exe = process.platform === 'win32' ? name + '.exe' : name;
+  return JAVA_HOME ? path.join(JAVA_HOME, 'bin', exe) : exe;
+};
+const JAVAC = javaBin('javac');
+const JAVA = javaBin('java');
+const JAVA_SDK = path.join(ROOT, 'sdk', 'java');
+const JAVA_OUT = path.join(WORK, 'java-classes');
+
+function haveJava() {
+  try {
+    const r = spawnSync(JAVAC, ['-version'], { encoding: 'utf8' });
+    return r.status === 0 || /javac/i.test(`${r.stdout || ''}${r.stderr || ''}`);
+  } catch {
+    return false;
+  }
+}
+
+// 用 javac 直接编译 SDK 源码 + e2e 测试（SDK 零依赖，无需本机 Gradle）。
+async function buildJava() {
+  const srcDir = path.join(JAVA_SDK, 'src', 'main', 'java');
+  const testDir = path.join(JAVA_SDK, 'tests');
+  const sources = [];
+  for (const rel of await fs.readdir(srcDir, { recursive: true })) if (rel.endsWith('.java')) sources.push(path.join(srcDir, rel));
+  for (const rel of await fs.readdir(testDir, { recursive: true })) if (rel.endsWith('.java')) sources.push(path.join(testDir, rel));
+  await fs.mkdir(JAVA_OUT, { recursive: true });
+  const argfile = path.join(WORK, 'javac.args');
+  await fs.writeFile(argfile, sources.map((s) => `"${s.replace(/\\/g, '/')}"`).join('\n'));
+  const r = spawnSync(JAVAC, ['--release', '21', '-encoding', 'UTF-8', '-d', JAVA_OUT, '@' + argfile], { encoding: 'utf8', maxBuffer: 64 * MiB });
+  process.stdout.write(r.stdout || '');
+  process.stderr.write(r.stderr || '');
+  return r.status === 0;
+}
+
+function runJava(cls, args) {
+  // 强制 UTF-8 输出，避免 Windows 默认控制台编码（GBK）把中文日志变成乱码。
+  const res = spawnSync(JAVA, ['-Dstdout.encoding=UTF-8', '-Dstderr.encoding=UTF-8', '-Dfile.encoding=UTF-8', '-cp', JAVA_OUT, cls, ...args], { encoding: 'utf8', maxBuffer: 64 * MiB });
+  process.stdout.write(res.stdout || '');
+  process.stderr.write(res.stderr || '');
+  failures += (res.stdout.match(/^ {2}FAIL/gm) || []).length;
+  if (res.status !== 0 && !(res.stdout || '').includes('FAIL')) failures++;
+}
 
 // ------------------------------------------------------------ 辅助函数
 
@@ -319,6 +366,20 @@ async function main() {
       runPy(pyTest, [server, PROJECT, READ, path.join(WORK, 'py-dst'), expect1, expect2, String(pub2.UploadedRaw)]);
     }
 
+    // --------------------------------------------------- Java SDK
+    let javaReady = false;
+    const javaClient = path.join(JAVA_SDK, 'tests', 'E2EClient.java');
+    if (!process.env.E2E_SKIP_JAVA && existsSync(javaClient)) {
+      if (haveJava()) {
+        console.log('\n== Java SDK');
+        javaReady = await buildJava();
+        if (!javaReady) console.log('  (Java 编译失败，跳过)');
+        else runJava('qentimart.e2e.E2EClient', [server, PROJECT, READ, path.join(WORK, 'java-dst'), expect1, expect2, String(pub2.UploadedRaw)]);
+      } else {
+        console.log('\n== Java SDK (未找到 JDK ≥ 21，跳过)');
+      }
+    }
+
     // --------------------------------------------------- 静态模式（Cloudflare Pages 式）
     console.log('\n== 静态模式');
     let fileCount = 0;
@@ -361,6 +422,11 @@ async function main() {
       const pyStatic = path.join(ROOT, 'sdk', 'python', 'tests', 'e2e_static.py');
       if (!process.env.E2E_SKIP_PYTHON && existsSync(pyStatic)) {
         runPy(pyStatic, [site, path.join(WORK, 'py-static-dst'), expect1, expect2, String(pub2.UploadedRaw)]);
+      }
+
+      // Java 静态检查同样自托管 site 目录（独立于 Node 进程）。
+      if (javaReady) {
+        runJava('qentimart.e2e.E2EStatic', [site, path.join(WORK, 'java-static-dst'), expect1, expect2, String(pub2.UploadedRaw)]);
       }
     } finally {
       staticSrv.close();
