@@ -60,6 +60,7 @@ with QentimArtClient(base_url="https://mygame.pages.dev") as client:
 | `delete_untracked_on_first_sync` | `False` | 安全开关：从未同步过的目录不会删除不属于目标版本的文件 |
 | `prerelease` | `False` | 允许 `latest` 解析到预发布版本 |
 | `verify_all` | `False` | 对所有本地文件计算哈希，不信任 size + mtime |
+| `verify_paths` | `None` | 对指定的重要文件强制哈希校验（即使 size+mtime 未变），普通文件仍走快速检测。每项为相对路径，以 `/` 结尾表示目录前缀 |
 | `on_progress` | `None` | 回调，参数为 `{"phase", "done", "total", "downloaded_bytes", "bytes_per_second"}` |
 | `cancel_event` | `None` | `threading.Event`，调用 `set()` 即可取消同步 |
 

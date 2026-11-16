@@ -38,6 +38,7 @@ class PlanContext(NamedTuple):
     tracked: Dict[str, int]
     has_state: bool
     progress: Callable[..., None]
+    verify_wanted: Callable[[str], bool] = lambda p: False
 
 
 def _decide_modified(plan: Plan, policy: str, t: ManifestFile, l: LocalFile, lock: threading.Lock) -> None:
@@ -58,8 +59,11 @@ def build_plan(ctx: PlanContext, target: Manifest) -> Plan:
     lock = threading.Lock()
 
     def is_clean(p: str, l: LocalFile) -> bool:
+        # size+mtime 快速检测存在盲区（内容改但大小不变、mtime 被还原）；
+        # verify_all 对所有文件、verify_wanted 对指定重要文件强制走哈希校验。
         o = old.get(p)
-        return (not ctx.verify_all) and o is not None and ctx.tracked.get(p) == l.mtime_ms and o.size == l.size
+        return (not ctx.verify_all) and (not ctx.verify_wanted(p)) and o is not None \
+            and ctx.tracked.get(p) == l.mtime_ms and o.size == l.size
 
     to_hash = []
     for t in target.files.values():

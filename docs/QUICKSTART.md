@@ -192,6 +192,19 @@ java -jar sdk/java/build/libs/qentimart-sdk-0.1.0.jar sync --server http://127.0
 
 安全保护：一个目录**第一次**同步时（还没有 `.qentimart` 状态），即使是 `overwrite` 也不会删除不属于目标版本的文件，避免把目录配错时误删数据。确实需要清理时，显式打开 `deleteUntrackedOnFirstSync`（Python 为 `delete_untracked_on_first_sync`）。
 
+### 完整性校验（mtime 不是内容身份）
+
+已同步文件默认用 **size + mtime** 快速判断是否变化，只有可疑文件才重算哈希——这是吞吐的关键。但它存在盲区：如果有人改了文件内容却**保持大小不变并还原了 mtime**，快速检测会漏判。按需要分层防护：
+
+- **普通文件**：保持默认快速检测即可。
+- **重要素材**：用 `verifyPaths`（Python `verify_paths`，CLI `--verify-paths a.pak,critical/`）指定——这些文件每次同步都按哈希校验，不匹配即重新下载自愈；其余文件仍走快速路径。
+- **强校验模式**：`verifyAll` 对所有文件强制哈希（代价最高）。
+- **定期巡检**：`verify` 命令重算当前版本每个文件的哈希，检测静默损坏。
+
+```bash
+java -jar sdk/java/build/libs/qentimart-sdk-0.1.0.jar sync --dir ./assets --server ... --project ... --verify-paths bundles/core.pak,shaders/
+```
+
 ## 4. 运维命令
 
 ```bash

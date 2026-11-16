@@ -69,6 +69,7 @@ await client.sync('./assets', { version: '1.0.0' });
 | `deleteUntrackedOnFirstSync` | `false` | 安全开关：目录从未同步过（没有 `.qentimart` 状态）时，即使是 `overwrite` 也不会删除不属于目标版本的文件，以防 `dir` 配错；设为 `true` 才删除 |
 | `prerelease` | `false` | 允许 `latest` 解析到预发布版本 |
 | `verifyAll` | `false` | 不信任 size+mtime，对所有本地文件计算哈希 |
+| `verifyPaths` | `[]` | 对指定的重要文件强制哈希校验（即使 size+mtime 未变），普通文件仍走快速检测。每项为相对路径，以 `/` 结尾表示目录前缀 |
 | `onProgress` | – | `({ phase, done, total, downloadedBytes, bytesPerSecond }) => void` |
 | `signal` | – | `AbortSignal`，用于取消 |
 

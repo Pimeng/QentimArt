@@ -108,6 +108,11 @@ export interface SyncOptions {
   prerelease?: boolean;
   /** 对每个文件计算哈希，而不是信任 size + mtime。 */
   verifyAll?: boolean;
+  /**
+   * 对指定的重要文件强制哈希校验（即使 size + mtime 未变），普通文件仍走快速检测。
+   * 每项为资源目录内的相对路径；以 "/" 结尾表示目录前缀（该目录下所有文件）。
+   */
+  verifyPaths?: string[];
   dryRun?: boolean;
   onProgress?: (p: Progress) => void;
   signal?: AbortSignal;

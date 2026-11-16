@@ -141,6 +141,32 @@ def main():
         c.sync(lock_dir, version="1.0.0")
         check(c.verify(lock_dir)["ok"], "sync heals the corrupted file")
 
+        # mtime+size 盲区：内容被改但大小不变、mtime 被还原 → 普通同步漏检；verify_paths 强制哈希并自愈。
+        bs = sorted(k for k in tree1 if k.startswith("ui/"))
+        victim3 = bs[1] if len(bs) > 1 else bs[0]
+        bp = os.path.join(lock_dir, victim3)
+        stt = os.stat(bp)
+        with open(bp, "rb") as f:
+            good = f.read()
+        bad = bytes(bytearray((good[0] ^ 0xFF,)) + good[1:])
+
+        def tamper():
+            with open(bp, "wb") as f:
+                f.write(bad)
+            os.utime(bp, (stt.st_atime, stt.st_mtime))  # 还原 mtime，骗过快速检测
+
+        tamper()
+        c.sync(lock_dir, version="1.0.0")  # 普通同步可能漏检（取决于本机 mtime 精度）
+        with open(bp, "rb") as f:
+            missed = f.read() == bad
+        print("  info  fast path %s same-size tamper; verify_paths covers it either way"
+              % ("missed (blind spot reproduced)" if missed else "caught"), flush=True)
+        tamper()  # 再次篡改，确保确实由 verify_paths 发现并自愈
+        c.sync(lock_dir, version="1.0.0", verify_paths=[victim3])
+        with open(bp, "rb") as f:
+            healed = f.read()
+        check(healed == good, "verify_paths forces a hash check and heals a same-size tamper")
+
     fresh = dest + "-fresh"
     shutil.rmtree(fresh, ignore_errors=True)
     with QentimArtClient(server, project, token=token, concurrency=16) as c:

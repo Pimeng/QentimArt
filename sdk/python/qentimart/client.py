@@ -149,7 +149,8 @@ class QentimArtClient:
 
     def sync(self, dir: str, version: str = "latest", local_changes: str = "overwrite", prerelease: bool = False,
              verify_all: bool = False, dry_run: bool = False, delete_untracked_on_first_sync: bool = False,
-             on_progress: Optional[ProgressFn] = None, cancel_event: Optional[threading.Event] = None) -> Dict[str, Any]:
+             on_progress: Optional[ProgressFn] = None, cancel_event: Optional[threading.Event] = None,
+             verify_paths: Optional[Any] = None) -> Dict[str, Any]:
         """将 ``dir`` 同步到 ``version``（升级或降级）。
 
         local_changes：'overwrite'（默认）恢复服务端文件并删除多余文件；
@@ -193,12 +194,21 @@ class QentimArtClient:
 
             progress("scan", 0, 1, True)
             files, dirs = scan_dir(root)
+            # 重要文件强制哈希校验：精确路径，或以 "/" 结尾的目录前缀。
+            _vp = list(verify_paths or [])
+            _vexact = {p for p in _vp if not p.endswith("/")}
+            _vpre = [p for p in _vp if p.endswith("/")]
+
+            def verify_wanted(p: str) -> bool:
+                return p in _vexact or any(p.startswith(pre) for pre in _vpre)
+
             ctx = PlanContext(
                 root=root, policy=local_changes, verify_all=verify_all,
                 delete_untracked_on_first_sync=delete_untracked_on_first_sync, files=files, dirs=dirs,
                 old=old_manifest if same_project else None,
                 tracked=dict(state.get("files") or {}) if same_project else {},
-                has_state=bool(same_project and old_manifest is not None), progress=progress)
+                has_state=bool(same_project and old_manifest is not None), progress=progress,
+                verify_wanted=verify_wanted)
             plan = build_plan(ctx, target)
             if plan.conflicts and local_changes == "fail":
                 raise SyncConflictError(plan.conflicts)

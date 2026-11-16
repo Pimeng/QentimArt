@@ -402,6 +402,26 @@ async function main() {
       await rc.sync(locDir, { version: '1.0.0' });
       check((await rc.verify(locDir)).ok, 'sync heals the corrupted file');
 
+      // mtime+size 盲区：内容被改但大小不变、mtime 被还原 → 普通同步漏检；verifyPaths 强制哈希并自愈。
+      const bsKeys = [...tree1.keys()].filter((k) => k.startsWith('ui/'));
+      const victim3 = bsKeys[1] ?? bsKeys[0];
+      const bp = path.join(locDir, victim3);
+      const st = await fs.stat(bp);
+      const good = await fs.readFile(bp);
+      const bad = Buffer.from(good);
+      bad[0] ^= 0xff;
+      const tamper = async () => {
+        await fs.writeFile(bp, bad);
+        await fs.utimes(bp, st.atime, st.mtime); // 还原 mtime，骗过 size+mtime 快速检测
+      };
+      await tamper();
+      await rc.sync(locDir, { version: '1.0.0' }); // 普通同步可能漏检（取决于本机 mtime 精度）
+      const missed = (await fs.readFile(bp)).equals(bad);
+      console.log(`  info  fast path ${missed ? 'missed (blind spot reproduced)' : 'caught'} same-size tamper; verifyPaths covers it either way`);
+      await tamper(); // 再次篡改，确保确实由 verifyPaths 发现并自愈
+      await rc.sync(locDir, { version: '1.0.0', verifyPaths: [victim3] });
+      check((await fs.readFile(bp)).equals(good), 'verifyPaths forces a hash check and heals a same-size tamper');
+
       // 中断 + 恢复：下载途中 abort，再 sync 到完成，逐字节一致、无残留 tmp。
       const intDir = path.join(WORK, 'node-rel-interrupt');
       const ac = new AbortController();

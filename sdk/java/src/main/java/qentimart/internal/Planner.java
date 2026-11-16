@@ -55,6 +55,7 @@ public final class Planner {
         public Map<String, Long> tracked;
         public boolean hasState;
         public Progress progress;
+        public java.util.function.Predicate<String> verifyWanted = p -> false;
     }
 
     public static Plan buildPlan(Context ctx, Manifest target) {
@@ -144,7 +145,9 @@ public final class Planner {
     }
 
     private static boolean isClean(Context ctx, Map<String, ManifestFile> old, String p, LocalFile l) {
-        if (ctx.verifyAll) return false;
+        // size+mtime 快速检测存在盲区（内容改但大小不变、mtime 被还原）；
+        // verifyAll 对所有文件、verifyWanted 对指定重要文件强制走哈希校验。
+        if (ctx.verifyAll || ctx.verifyWanted.test(p)) return false;
         ManifestFile o = old.get(p);
         Long tr = ctx.tracked.get(p);
         return o != null && tr != null && tr == l.mtimeMs() && o.size() == l.size();

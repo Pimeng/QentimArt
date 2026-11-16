@@ -31,6 +31,7 @@ def main(argv=None) -> int:
     p.add_argument("--local-changes", default="overwrite", choices=["overwrite", "keep", "fail"])
     p.add_argument("--prerelease", action="store_true")
     p.add_argument("--verify-all", action="store_true")
+    p.add_argument("--verify-paths", default=None, help="对重要文件强制哈希校验（逗号分隔；以 / 结尾为目录前缀）")
     p.add_argument("--delete-untracked-on-first-sync", action="store_true")
     p.add_argument("--concurrency", type=int, default=8)
     p.add_argument("--json", action="store_true", help="机器可读的输出")
@@ -78,6 +79,7 @@ def main(argv=None) -> int:
                 fn = c.plan if a.command == "plan" else c.sync
                 r = fn(need("dir"), version=a.version, local_changes=a.local_changes, prerelease=a.prerelease,
                        verify_all=a.verify_all, delete_untracked_on_first_sync=a.delete_untracked_on_first_sync,
+                       verify_paths=[s for s in a.verify_paths.split(",") if s] if a.verify_paths else None,
                        on_progress=None if a.json else progress)
                 f, b = r["files"], r["bytes"]
                 lines = [

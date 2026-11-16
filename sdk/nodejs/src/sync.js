@@ -101,12 +101,14 @@ async function acquireLock(dir) {
  * 只有 size/mtime 与已记录状态不一致的文件才会计算哈希。
  */
 async function buildPlan(ctx, target) {
-  const { dir, opts, local, oldManifest, tracked } = ctx;
+  const { dir, opts, local, oldManifest, tracked, verifyWanted } = ctx;
   const policy = opts.localChanges;
   const old = oldManifest?.files ?? new Map();
+  // size+mtime 的快速检测存在盲区：内容被改但大小不变、mtime 被还原时会被判为未变。
+  // verifyAll 对所有文件强制哈希；verifyWanted(p) 只对指定的重要文件强制哈希（普通文件仍走快速路径）。
   const isClean = (p, l) => {
     const o = old.get(p);
-    return tracked[p] !== undefined && tracked[p] === l.mtimeMs && o && o.size === l.size && !opts.verifyAll;
+    return tracked[p] !== undefined && tracked[p] === l.mtimeMs && o && o.size === l.size && !opts.verifyAll && !verifyWanted(p);
   };
 
   const plan = { toWrite: [], toDelete: [], unchanged: [], adopted: [], kept: [], conflicts: [], newTracked: {} };
@@ -235,6 +237,7 @@ export async function runSync(client, dir, opts) {
     localChanges: 'overwrite',
     prerelease: false,
     verifyAll: false,
+    verifyPaths: [],
     dryRun: false,
     ...opts,
   };
@@ -269,6 +272,10 @@ export async function runSync(client, dir, opts) {
 
     progress('scan', 0, 1, true);
     const local = await scanDir(dir);
+    // 重要文件强制哈希校验：精确路径，或以 "/" 结尾的目录前缀。
+    const vexact = new Set((opts.verifyPaths || []).filter((p) => !p.endsWith('/')));
+    const vpre = (opts.verifyPaths || []).filter((p) => p.endsWith('/'));
+    const verifyWanted = (p) => vexact.has(p) || vpre.some((pre) => p.startsWith(pre));
     const ctx = {
       dir,
       opts,
@@ -276,6 +283,7 @@ export async function runSync(client, dir, opts) {
       oldManifest: sameProject ? oldManifest : null,
       tracked: sameProject ? state.files ?? {} : {},
       hasState: Boolean(sameProject && oldManifest),
+      verifyWanted,
       progress,
     };
     const plan = await buildPlan(ctx, target);

@@ -142,6 +142,12 @@ public final class Cli {
                                 .prerelease(flags.contains("prerelease"))
                                 .verifyAll(flags.contains("verify-all"))
                                 .deleteUntrackedOnFirstSync(flags.contains("delete-untracked-on-first-sync"));
+                        String vpStr = opt.get("verify-paths");
+                        if (vpStr != null && !vpStr.isEmpty()) {
+                            List<String> vpl = new ArrayList<>();
+                            for (String s : vpStr.split(",")) if (!s.isEmpty()) vpl.add(s);
+                            o.verifyPaths(vpl);
+                        }
                         if (!json) {
                             long[] last = {0};
                             o.onProgress(pr -> {

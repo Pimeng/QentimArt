@@ -144,6 +144,32 @@ public class E2EClient {
                     "verify detects silent corruption (" + victim2 + ")");
             c.sync(lockDir, new SyncOptions().version("1.0.0"));
             check(Boolean.TRUE.equals(c.verify(lockDir).get("ok")), "sync heals the corrupted file");
+
+            // mtime+size 盲区：内容被改但大小不变、mtime 被还原 → 普通同步漏检；verifyPaths 强制哈希并自愈。
+            java.util.List<String> bs = new ArrayList<>();
+            for (String k : new java.util.TreeSet<>(tree1.keySet())) if (k.startsWith("ui/")) bs.add(k);
+            String victim3 = bs.size() > 1 ? bs.get(1) : bs.get(0);
+            Path bp = Paths.get(lockDir).resolve(victim3);
+            long mt = Files.getLastModifiedTime(bp).toMillis();
+            byte[] good = Files.readAllBytes(bp);
+            byte[] bad = good.clone();
+            bad[0] ^= 0xff;
+            Runnable tamper = () -> {
+                try {
+                    Files.write(bp, bad);
+                    Files.setLastModifiedTime(bp, java.nio.file.attribute.FileTime.fromMillis(mt)); // 还原 mtime
+                } catch (java.io.IOException e) {
+                    throw new RuntimeException(e);
+                }
+            };
+            tamper.run();
+            c.sync(lockDir, new SyncOptions().version("1.0.0")); // 普通同步可能漏检（取决于本机 mtime 精度）
+            boolean missed = java.util.Arrays.equals(Files.readAllBytes(bp), bad);
+            System.out.println("  info  fast path " + (missed ? "missed (blind spot reproduced)" : "caught")
+                    + " same-size tamper; verifyPaths covers it either way");
+            tamper.run(); // 再次篡改，确保确实由 verifyPaths 发现并自愈
+            c.sync(lockDir, new SyncOptions().version("1.0.0").verifyPaths(java.util.List.of(victim3)));
+            check(java.util.Arrays.equals(Files.readAllBytes(bp), good), "verifyPaths forces a hash check and heals a same-size tamper");
         }
 
         String fresh = dest + "-fresh";

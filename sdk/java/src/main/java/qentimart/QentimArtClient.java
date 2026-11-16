@@ -281,6 +281,15 @@ public final class QentimArtClient implements AutoCloseable {
             ctx.tracked = sameProject ? trackedMap(sr.state) : new HashMap<>();
             ctx.hasState = sameProject && sr.manifest != null;
             ctx.progress = progress;
+            // 重要文件强制哈希校验：精确路径，或以 "/" 结尾的目录前缀。
+            List<String> vp = o.verifyPaths == null ? Collections.emptyList() : o.verifyPaths;
+            Set<String> vexact = new java.util.HashSet<>();
+            List<String> vpre = new ArrayList<>();
+            for (String x : vp) {
+                if (x.endsWith("/")) vpre.add(x);
+                else vexact.add(x);
+            }
+            ctx.verifyWanted = p -> vexact.contains(p) || vpre.stream().anyMatch(p::startsWith);
 
             Plan plan = Planner.buildPlan(ctx, target);
             if (!plan.conflicts.isEmpty() && policy.equals("fail")) throw new SyncConflictException(plan.conflicts);
