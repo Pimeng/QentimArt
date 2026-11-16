@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"time"
 
 	"qentimart/internal/catalog"
 	"qentimart/internal/cdc"
@@ -159,6 +160,7 @@ func cmdSimple(ctx context.Context, args []string, what string) error {
 	from := fs.String("from", "", "diff：起始版本")
 	to := fs.String("to", "latest", "diff：目标版本")
 	dry := fs.Bool("dry-run", false, "gc：仅报告，不实际删除")
+	gcGrace := fs.Duration("gc-grace", time.Hour, "gc：宽限期，保护最近写入但尚未被引用的块（对齐服务端默认 1h）")
 	static := fs.Bool("static", false, "静态模式：直接操作本地静态树，配合 -o")
 	outDir := fs.String("o", "", "静态模式的静态树目录")
 	fs.Parse(args)
@@ -189,7 +191,7 @@ func cmdSimple(ctx context.Context, args []string, what string) error {
 			}
 			out = map[string]any{"deleted": *ver, "hint": "run gc --static -o DIR to reclaim chunk storage"}
 		case "gc":
-			r, err := publish.GCStatic(ctx, backend, *dry)
+			r, err := publish.GCStatic(ctx, backend, *dry, *gcGrace)
 			if err != nil {
 				return err
 			}

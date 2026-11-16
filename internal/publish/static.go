@@ -335,7 +335,10 @@ type GCResult struct {
 }
 
 // GCStatic 删除静态树中不再被任何版本引用的块。
-func GCStatic(ctx context.Context, backend storage.Backend, dryRun bool) (*GCResult, error) {
+//
+// grace 为宽限期：最近写入（ModTime 晚于 now-grace）但尚未被任何版本引用的块会被
+// 保留，以免误删正在发布、还没写 index.json 的新块（静态树无进程锁，发布与 GC 可能并发）。
+func GCStatic(ctx context.Context, backend storage.Backend, dryRun bool, grace time.Duration) (*GCResult, error) {
 	versions, err := readVersions(ctx, backend)
 	if err != nil {
 		return nil, err
@@ -351,6 +354,7 @@ func GCStatic(ctx context.Context, backend storage.Backend, dryRun bool) (*GCRes
 		}
 	}
 	res := &GCResult{DryRun: dryRun}
+	cutoff := time.Now().Add(-grace)
 	var del []storage.ObjectInfo
 	err = backend.List(ctx, catalog.ChunksPrefix, func(o storage.ObjectInfo) error {
 		if len(o.Key) < 64 {
@@ -360,7 +364,7 @@ func GCStatic(ctx context.Context, backend storage.Backend, dryRun bool) (*GCRes
 		if err != nil {
 			return nil
 		}
-		if _, ok := ref[h]; ok {
+		if _, ok := ref[h]; ok || o.ModTime.After(cutoff) {
 			res.KeptChunks++
 		} else {
 			del = append(del, o)

@@ -84,10 +84,19 @@ gzip 压缩的 JSON，文件按路径排序：
 <asset dir>/.qentimart/state.json        {"formatVersion":1,"project","version","syncedAt","files":{path: mtimeMs}}
 <asset dir>/.qentimart/manifest.json.gz  当前版本清单原文（用于本地块复用与离线 status）
 <asset dir>/.qentimart/tmp/              同步过程中的临时文件，完成后删除
-<asset dir>/.qentimart/lock              防止并发同步
+<asset dir>/.qentimart/lock              防止并发同步（文件锁 + 进程内互斥）
 ```
 
 `mtimeMs` 为整数毫秒（`floor(mtime)`）。Node、Python 和 Java SDK 的状态格式相同，可以互相接管同一个目录。
+
+### 并发与中断
+
+- **并发同步**：`.qentimart/lock` 记录 `{pid, at}`。文件锁防跨进程并发：发现锁时，若持锁 pid 仍存活则抛 `ELOCKED`，否则视为陈旧锁并抢占（容忍崩溃残留）。此外每个进程内维护一份「已锁目录」集合，提供进程内（多线程/多协程）互斥——否则同进程内的并发同步会因 `pid 相同` 而互判对方锁为陈旧。
+- **中断恢复**：所有文件都先写入 `.qentimart/tmp/` 再原子替换（`rename`），中途被杀不会留下半个目标文件；`state.json` 只在全部成功后写入，下次同步据此或按 size+mtime 重新规划并自愈。`tmp/` 在每次同步开始时清空。（原子替换保证可见性原子，不含抗断电的 `fsync` 持久性。）
+
+### 消费端路径安全
+
+下游 SDK 不信任清单与服务端：解析清单时拒绝 `..`、绝对路径、Windows 盘符/非法字符、保留目录 `.qentimart`、反斜杠与 `\0`；写入时**逐段创建父目录且不跟随符号链接**——若目标路径的某个本地父目录是指向资源目录之外的符号链接，同步会以 `unsafe path ... is a symlink` 拒绝，避免 `rename` 把文件写到资源目录外（逃逸）。
 
 ## 静态分发树（方案 B）
 

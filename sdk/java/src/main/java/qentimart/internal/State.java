@@ -13,6 +13,8 @@ import java.nio.file.StandardOpenOption;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 /** {@code <dir>/.qentimart} 中的本地状态（与 Node.js / Python SDK 格式相同，可互相接管）。 */
 public final class State {
@@ -67,44 +69,61 @@ public final class State {
         LocalFs.writeAtomic(sd.resolve(STATE_FILE), Json.writeBytes(state, false));
     }
 
-    /** 获取同步锁；返回释放函数。另一个活着的进程持锁时抛 ELOCKED。 */
+    // 进程内已持锁的目录（绝对路径）。文件锁的陈旧抢占含 "pid≠自己" 判定，故同进程内
+    // 多线程并发同步同目录时彼此会误判对方锁为陈旧并互夺；这一层在文件锁之前提供进程内互斥。
+    private static final Set<String> IN_PROCESS = ConcurrentHashMap.newKeySet();
+
+    /** 获取同步锁；返回释放函数。另一个活着的进程（或本进程另一处）持锁时抛 ELOCKED。 */
     public static Runnable acquireLock(Path root) {
-        Path sd = root.resolve(Wire.STATE_DIR);
+        String key = root.toAbsolutePath().normalize().toString();
+        if (!IN_PROCESS.add(key)) {
+            throw new QentimArtException("another sync is running on " + root + " (this process)", -1, "ELOCKED");
+        }
         try {
-            Files.createDirectories(sd);
-        } catch (IOException e) {
-            throw new QentimArtException("cannot create " + sd + ": " + e.getMessage(), e);
-        }
-        Path lock = sd.resolve(LOCK_FILE);
-        Runnable release = () -> {
+            Path sd = root.resolve(Wire.STATE_DIR);
             try {
-                Files.deleteIfExists(lock);
-            } catch (IOException ignored) {
-                // 忽略
-            }
-        };
-        for (int i = 0; i < 2; i++) {
-            try (FileChannel ch = FileChannel.open(lock, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)) {
-                Map<String, Object> info = new LinkedHashMap<>();
-                info.put("pid", LocalFs.currentPid());
-                info.put("at", System.currentTimeMillis());
-                ch.write(ByteBuffer.wrap(Json.writeBytes(info, false)));
-                return release;
-            } catch (FileAlreadyExistsException e) {
-                boolean stale = true;
-                try {
-                    Map<String, Object> info = Json.parseObject(Files.readAllBytes(lock));
-                    long pid = info.get("pid") instanceof Number ? ((Number) info.get("pid")).longValue() : 0;
-                    if (pid != 0 && pid != LocalFs.currentPid() && LocalFs.pidAlive(pid)) stale = false;
-                } catch (IOException | RuntimeException ex) {
-                    // 无法解析 → 视为陈旧
-                }
-                if (!stale) throw new QentimArtException("another sync is running on " + root, -1, "ELOCKED");
-                release.run();
+                Files.createDirectories(sd);
             } catch (IOException e) {
-                throw new QentimArtException("cannot lock " + root + ": " + e.getMessage(), e);
+                throw new QentimArtException("cannot create " + sd + ": " + e.getMessage(), e);
             }
+            Path lock = sd.resolve(LOCK_FILE);
+            Runnable release = () -> {
+                IN_PROCESS.remove(key);
+                try {
+                    Files.deleteIfExists(lock);
+                } catch (IOException ignored) {
+                    // 忽略
+                }
+            };
+            for (int i = 0; i < 2; i++) {
+                try (FileChannel ch = FileChannel.open(lock, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)) {
+                    Map<String, Object> info = new LinkedHashMap<>();
+                    info.put("pid", LocalFs.currentPid());
+                    info.put("at", System.currentTimeMillis());
+                    ch.write(ByteBuffer.wrap(Json.writeBytes(info, false)));
+                    return release;
+                } catch (FileAlreadyExistsException e) {
+                    boolean stale = true;
+                    try {
+                        Map<String, Object> info = Json.parseObject(Files.readAllBytes(lock));
+                        long pid = info.get("pid") instanceof Number ? ((Number) info.get("pid")).longValue() : 0;
+                        if (pid != 0 && pid != LocalFs.currentPid() && LocalFs.pidAlive(pid)) stale = false;
+                    } catch (IOException | RuntimeException ex) {
+                        // 无法解析 → 视为陈旧
+                    }
+                    if (!stale) throw new QentimArtException("another sync is running on " + root, -1, "ELOCKED");
+                    try {
+                        Files.deleteIfExists(lock); // 只清理陈旧锁文件，保留进程内持有
+                    } catch (IOException ignored) {
+                    }
+                } catch (IOException e) {
+                    throw new QentimArtException("cannot lock " + root + ": " + e.getMessage(), e);
+                }
+            }
+            throw new QentimArtException("could not lock " + root, -1, "ELOCKED");
+        } catch (RuntimeException e) {
+            IN_PROCESS.remove(key);
+            throw e;
         }
-        throw new QentimArtException("could not lock " + root, -1, "ELOCKED");
     }
 }

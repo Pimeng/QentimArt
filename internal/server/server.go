@@ -370,6 +370,9 @@ func (s *Server) handleGC(w http.ResponseWriter, r *http.Request, p *project) er
 	var freed int64
 	var toDelete []storage.ObjectInfo
 	err = s.store.List(ctx, s.chunkPrefix(p.name), func(o storage.ObjectInfo) error {
+		if len(o.Key) < 64 {
+			return nil
+		}
 		h, err := wire.ParseHash(o.Key[len(o.Key)-64:])
 		if err != nil {
 			return nil

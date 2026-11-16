@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import os
 import threading
@@ -85,13 +86,19 @@ def hash_file(path: str) -> str:
 
 
 def replace_retry(src: str, dst: str, attempts: int = 8) -> None:
-    """带重试的 os.replace，用于应对 Windows 上短暂的共享冲突。"""
+    """带重试的 os.replace，用于应对 Windows 上短暂的共享冲突。
+
+    重试面与 Node（EPERM/EBUSY/EACCES）对齐：除 PermissionError 外，也重试
+    Windows 共享/占用（winerror 5/32）与 EBUSY/EACCES/EPERM。"""
     for i in range(attempts + 1):
         try:
             os.replace(src, dst)
             return
-        except PermissionError:
-            if i >= attempts:
+        except OSError as e:
+            transient = isinstance(e, PermissionError) \
+                or getattr(e, "winerror", None) in (5, 32) \
+                or e.errno in (errno.EACCES, errno.EBUSY, errno.EPERM)
+            if not transient or i >= attempts:
                 raise
             time.sleep(0.05 * (2 ** min(i, 5)))
 

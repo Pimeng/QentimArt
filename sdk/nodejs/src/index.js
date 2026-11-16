@@ -39,13 +39,19 @@ async function apiFetchChunks(client, { hashes, sizeOf, onChunk, stats, signal }
     return client.http.withRetry(async () => {
       const body = Buffer.concat([...pending].map((h) => Buffer.from(h, 'hex')));
       const res = await client.http.raw('POST', '/chunks/fetch', { body, headers: { 'content-type': 'application/octet-stream' }, signal });
-      for await (const f of parseFrames(res)) {
-        if (!pending.has(f.hash)) throw new QentimArtError(`server sent unexpected chunk ${f.hash}`);
-        const raw = await decodeFrame(f);
-        stats.downloadedWire += f.payload.length + 41;
-        stats.downloadedRaw += raw.length;
-        await onChunk(f.hash, raw);
-        pending.delete(f.hash);
+      try {
+        for await (const f of parseFrames(res)) {
+          if (!pending.has(f.hash)) throw new QentimArtError(`server sent unexpected chunk ${f.hash}`);
+          const raw = await decodeFrame(f);
+          stats.downloadedWire += f.payload.length + 41;
+          stats.downloadedRaw += raw.length;
+          await onChunk(f.hash, raw);
+          pending.delete(f.hash);
+        }
+      } catch (err) {
+        // 出错时销毁响应流，避免未读完的 keep-alive socket 被复用（重试只补未收到的哈希）。
+        res.destroy(err);
+        throw err;
       }
       if (pending.size) throw new QentimArtError(`server stream ended with ${pending.size} chunk(s) missing`, { code: 'ETRUNCATED' });
     }, signal);

@@ -306,6 +306,8 @@ qentimart delete-version --static -o ./site -version 1.0.0   # 删除某版本�
 qentimart gc --static -o ./site                              # 回收不再被引用的块（可加 -dry-run）
 ```
 
+静态 GC 默认保留宽限期内（`-gc-grace`，默认 1h）最近写入的块，避免与并发发布互删；确认没有发布在进行时可用 `-gc-grace 0` 立即回收。
+
 清理后重新 `wrangler pages deploy ./site` 即可。
 
 ## 运行测试

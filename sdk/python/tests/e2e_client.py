@@ -7,8 +7,9 @@ import json
 import os
 import shutil
 import sys
+import threading
 
-from qentimart import QentimArtClient, SyncConflictError
+from qentimart import QentimArtClient, QentimArtError, SyncConflictError
 
 MiB = 1 << 20
 failures = 0
@@ -104,6 +105,41 @@ def main():
         r = c.sync(wrong, version="1.0.0")
         check(os.path.exists(os.path.join(wrong, "important", "user-file.doc")) and "important/user-file.doc" in r["files"]["kept"],
               "first sync never deletes unknown files (delete_untracked_on_first_sync=False)")
+
+        # --- 可靠性 ---
+        lock_dir = dest + "-rel"
+        shutil.rmtree(lock_dir, ignore_errors=True)
+        c.sync(lock_dir, version="1.0.0")
+        # 进程内并发互斥：同进程两个线程并发 sync 同目录，恰有其一 ELOCKED。
+        results = []
+        rlock = threading.Lock()
+
+        def one():
+            try:
+                c.sync(lock_dir, version="1.0.0")
+                with rlock:
+                    results.append("ok")
+            except QentimArtError as e:
+                with rlock:
+                    results.append(e.code or "err")
+
+        t1, t2 = threading.Thread(target=one), threading.Thread(target=one)
+        t1.start(); t2.start(); t1.join(); t2.join()
+        check(results.count("ELOCKED") == 1 and results.count("ok") == 1,
+              "in-process concurrent sync of same dir: exactly one ELOCKED %r" % results)
+
+        # 静默损坏自愈：翻转一个字节 → verify 报告 → 再 sync 复原。
+        victim2 = sorted(k for k in tree1 if k.startswith("ui/"))[0]
+        vp = os.path.join(lock_dir, victim2)
+        with open(vp, "rb") as f:
+            data = bytearray(f.read())
+        data[0] ^= 0xFF
+        with open(vp, "wb") as f:
+            f.write(data)
+        vr = c.verify(lock_dir)
+        check((not vr["ok"]) and victim2 in vr["corrupted"], "verify detects silent corruption (%s)" % victim2)
+        c.sync(lock_dir, version="1.0.0")
+        check(c.verify(lock_dir)["ok"], "sync heals the corrupted file")
 
     fresh = dest + "-fresh"
     shutil.rmtree(fresh, ignore_errors=True)

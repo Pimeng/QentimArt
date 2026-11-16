@@ -13,8 +13,9 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import net from 'node:net';
 import httpMod from 'node:http';
+import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
-import { QentimArtClient, SyncConflictError } from '../sdk/nodejs/src/index.js';
+import { QentimArtClient, SyncConflictError, STATE_DIR } from '../sdk/nodejs/src/index.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const WORK = path.join(ROOT, 'tests', '.work');
@@ -145,6 +146,38 @@ function freePort() {
       s.close(() => resolve(port));
     });
   });
+}
+
+// 用一个 HTTP 服务器托管目录 dir（只读），返回 { url, close }。用于可靠性测试里托管伪造的静态树。
+async function serveStatic(dir) {
+  const srv = httpMod.createServer((req, res) => {
+    const rel = decodeURIComponent(req.url.split('?')[0]).replace(/^\/+/, '');
+    const fp = path.join(dir, rel);
+    if (!fp.startsWith(dir)) {
+      res.statusCode = 403;
+      return res.end('forbidden');
+    }
+    fs.readFile(fp).then(
+      (b) => res.end(b),
+      () => {
+        res.statusCode = 404;
+        res.end('not found');
+      },
+    );
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  return { url: `http://127.0.0.1:${srv.address().port}`, close: () => srv.close() };
+}
+
+// 伪造一棵只含单个空文件（路径为 filePath）的静态树，用于测试消费端路径安全。
+async function craftEvilTree(root, filePath) {
+  const emptyHash = createHash('sha256').update(Buffer.alloc(0)).digest('hex');
+  const meta = { version: '1.0.0', createdAt: '2026-01-01T00:00:00Z', prerelease: false, fileCount: 1, totalSize: 0, chunkCount: 0, manifestSize: 0, baseVersion: '', deltaBytes: 0 };
+  const manifest = { formatVersion: 1, version: '1.0.0', createdAt: meta.createdAt, files: [{ path: filePath, size: 0, hash: emptyHash }] };
+  const index = { formatVersion: 1, project: 'evil', updatedAt: meta.createdAt, latest: '1.0.0', latestPrerelease: null, versions: [meta] };
+  await writeAsset(path.join(root, 'index.json'), Buffer.from(JSON.stringify(index)));
+  await writeAsset(path.join(root, 'versions/1.0.0/meta.json'), Buffer.from(JSON.stringify(meta)));
+  await writeAsset(path.join(root, 'versions/1.0.0/manifest.json.gz'), zlib.gzipSync(Buffer.from(JSON.stringify(manifest))));
 }
 
 function run(cmd, args, opts = {}) {
@@ -346,6 +379,56 @@ async function main() {
     fast.close();
     client.close();
 
+    // --------------------------------------------------- 可靠性加固
+    console.log('\n== 可靠性');
+    {
+      const rc = new QentimArtClient({ server, project: PROJECT, token: READ, concurrency: 8 });
+
+      // 进程内并发互斥：同一进程并发两次 sync 同一目录，恰有其一 ELOCKED。
+      const locDir = path.join(WORK, 'node-rel-lock');
+      await rc.sync(locDir, { version: '1.0.0' });
+      const settled = await Promise.allSettled([rc.sync(locDir, { version: '1.0.0' }), rc.sync(locDir, { version: '1.0.0' })]);
+      const locked = settled.filter((s) => s.status === 'rejected' && s.reason?.code === 'ELOCKED').length;
+      const okd = settled.filter((s) => s.status === 'fulfilled').length;
+      check(locked === 1 && okd === 1, `concurrent sync of same dir: exactly one ELOCKED (locked=${locked}, ok=${okd})`);
+
+      // 静默损坏自愈：翻转一个字节 → verify 报告 → 再 sync 复原。
+      const victim = [...tree1.keys()].find((k) => k.startsWith('ui/')) ?? [...tree1.keys()][0];
+      const buf = await fs.readFile(path.join(locDir, victim));
+      buf[0] ^= 0xff;
+      await fs.writeFile(path.join(locDir, victim), buf);
+      const vr = await rc.verify(locDir);
+      check(!vr.ok && vr.corrupted.includes(victim), `verify detects silent corruption (${victim})`);
+      await rc.sync(locDir, { version: '1.0.0' });
+      check((await rc.verify(locDir)).ok, 'sync heals the corrupted file');
+
+      // 中断 + 恢复：下载途中 abort，再 sync 到完成，逐字节一致、无残留 tmp。
+      const intDir = path.join(WORK, 'node-rel-interrupt');
+      const ac = new AbortController();
+      let aborted = false;
+      try {
+        await rc.sync(intDir, {
+          version: '1.1.0',
+          signal: ac.signal,
+          onProgress: (p) => {
+            if (p.phase === 'download' && p.done > 0 && !aborted) {
+              aborted = true;
+              ac.abort();
+            }
+          },
+        });
+      } catch {
+        /* 预期被中止 */
+      }
+      const fin = await rc.sync(intDir, { version: '1.1.0' });
+      const tmpDir = path.join(intDir, STATE_DIR, 'tmp');
+      const tmpEmpty = !existsSync(tmpDir) || (await fs.readdir(tmpDir)).length === 0;
+      check(fin.version === '1.1.0' && !sameTree(tree2, await treeHashes(intDir)) && tmpEmpty,
+        'interrupt mid-download then re-sync is byte-identical with no leftover tmp');
+
+      rc.close();
+    }
+
     // --------------------------------------------------- Python SDK
     const py = process.env.PYTHON ?? (process.platform === 'win32' ? 'python' : 'python3');
     const pyEnv = { ...process.env, PYTHONPATH: path.join(ROOT, 'sdk', 'python') };
@@ -417,6 +500,57 @@ async function main() {
       check(sr.upToDate && sr.bytes.downloadedWire === 0, '静态模式第二次同步为空操作');
       console.log(`  静态树文件数 ${fileCount}（Cloudflare Pages 免费版上限 20000）`);
       sclient.close();
+
+      // 消费端路径安全：恶意清单（父目录符号链接逃逸 / ".." 逃逸）必须被拒绝，不写到 root 外。
+      const evilSym = path.join(WORK, 'evil-symlink');
+      await craftEvilTree(evilSym, 'sub/empty.txt');
+      const symSrv = await serveStatic(evilSym);
+      try {
+        const dst = path.join(WORK, 'escape-dst');
+        const out = path.join(WORK, 'escape-out');
+        await fs.rm(dst, { recursive: true, force: true });
+        await fs.mkdir(dst, { recursive: true });
+        await fs.mkdir(out, { recursive: true });
+        let symlinked = true;
+        try {
+          await fs.symlink(out, path.join(dst, 'sub'), 'dir');
+        } catch {
+          symlinked = false;
+        }
+        if (!symlinked) {
+          console.log('  skip  符号链接父目录逃逸（本机无权限创建符号链接）');
+        } else {
+          const ec = new QentimArtClient({ baseUrl: symSrv.url });
+          let threw = false;
+          try {
+            await ec.sync(dst);
+          } catch (e) {
+            threw = e.code === 'EUNSAFE' || /symlink|unsafe/i.test(e.message);
+          }
+          ec.close();
+          const outEmpty = (await fs.readdir(out)).length === 0;
+          check(threw && outEmpty, '符号链接父目录不会让写入逃逸到 root 外');
+        }
+      } finally {
+        symSrv.close();
+      }
+
+      const evilDot = path.join(WORK, 'evil-dotdot');
+      await craftEvilTree(evilDot, '../escape.txt');
+      const dotSrv = await serveStatic(evilDot);
+      try {
+        const ec2 = new QentimArtClient({ baseUrl: dotSrv.url });
+        let threw2 = false;
+        try {
+          await ec2.sync(path.join(WORK, 'dotdot-dst'));
+        } catch (e) {
+          threw2 = /unsafe/i.test(e.message);
+        }
+        ec2.close();
+        check(threw2 && !existsSync(path.join(WORK, 'escape.txt')), '含 ".." 的恶意清单被拒绝（root 外无文件产生）');
+      } finally {
+        dotSrv.close();
+      }
 
       // Python 静态检查自己托管 site 目录（独立进程），不受此处 spawnSync 阻塞影响。
       const pyStatic = path.join(ROOT, 'sdk', 'python', 'tests', 'e2e_static.py');

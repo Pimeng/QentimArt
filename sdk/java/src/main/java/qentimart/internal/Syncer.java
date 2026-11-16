@@ -9,11 +9,10 @@ import qentimart.internal.Planner.SourceIndex;
 import qentimart.internal.Planner.WriteTask;
 
 import java.io.IOException;
-import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
-import java.nio.file.NotDirectoryException;
 import java.nio.file.Path;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -187,16 +186,12 @@ public final class Syncer {
         }
     }
 
+    // 逐段创建父目录，绝不跟随符号链接：若某个已存在的祖先是符号链接，拒绝写入，
+    // 以免清单路径合法但本地父目录指向 root 之外时，原子替换把文件写到 root 外（逃逸）。
     private static void ensureParent(Path root, String rel, Set<String> deleteSet, String policy) throws IOException {
         int slash = rel.lastIndexOf('/');
         if (slash < 0) return;
         String parent = rel.substring(0, slash);
-        try {
-            Files.createDirectories(root.resolve(parent));
-            return;
-        } catch (FileAlreadyExistsException | NotDirectoryException e) {
-            // 需要目录的位置上存在一个文件（例如 "a" -> "a/b"），下面逐段处理
-        }
         String[] segs = parent.split("/");
         StringBuilder acc = new StringBuilder();
         for (int i = 0; i < segs.length; i++) {
@@ -204,15 +199,27 @@ public final class Syncer {
             acc.append(segs[i]);
             String p = acc.toString();
             Path ap = root.resolve(p);
-            if (Files.exists(ap, LinkOption.NOFOLLOW_LINKS) && !Files.isDirectory(ap)) {
+            BasicFileAttributes at;
+            try {
+                at = Files.readAttributes(ap, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+            } catch (IOException e) {
+                at = null; // 不存在
+            }
+            if (at != null && at.isSymbolicLink()) {
+                throw new QentimArtException("unsafe path " + rel + ": '" + p + "' is a symlink", -1, "EUNSAFE");
+            }
+            if (at != null && !at.isDirectory()) {
+                // 该位置是普通文件，但需要它是目录（例如 "a" -> "a/b"）。
                 if (!deleteSet.contains(p) && !policy.equals("overwrite")) {
                     throw new QentimArtException(p + " is a file but " + rel + " needs it to be a directory");
                 }
                 Files.deleteIfExists(ap);
                 deleteSet.remove(p);
+                Files.createDirectory(ap);
+            } else if (at == null) {
+                Files.createDirectory(ap);
             }
         }
-        Files.createDirectories(root.resolve(parent));
     }
 
     /** 删除操作放在最后执行，以便被删除的文件仍可作为块来源。 */
@@ -220,7 +227,9 @@ public final class Syncer {
         for (String p : paths) {
             Path ap = root.resolve(p);
             // 该路径可能已不存在，或已变为目标版本中的目录（文件 -> 目录）。
-            if (!Files.exists(ap, LinkOption.NOFOLLOW_LINKS) || Files.isDirectory(ap)) continue;
+            // 用 NOFOLLOW：真实目录才跳过，符号链接按条目本身删除、绝不跟随到外部目标。
+            if (!Files.exists(ap, LinkOption.NOFOLLOW_LINKS)
+                    || Files.isDirectory(ap, LinkOption.NOFOLLOW_LINKS)) continue;
             Files.deleteIfExists(ap);
             LocalFs.pruneEmptyDirs(root, p);
         }

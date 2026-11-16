@@ -48,33 +48,50 @@ async function writeState(dir, state, manifestGz) {
   await writeFileAtomic(path.join(sd, STATE_FILE), JSON.stringify(state));
 }
 
+// 进程内已持锁的目录（绝对路径）。文件锁的陈旧抢占含 "pid≠自己" 判定，故同进程内
+// 并发同步同目录时彼此会误判对方锁为陈旧并互夺；这一层在文件锁之前提供进程内互斥。
+const inProcessLocks = new Set();
+
 async function acquireLock(dir) {
-  const sd = path.join(dir, STATE_DIR);
-  await fs.mkdir(sd, { recursive: true });
-  const lock = path.join(sd, LOCK_FILE);
-  for (let i = 0; i < 2; i++) {
-    try {
-      const fh = await fs.open(lock, 'wx');
-      await fh.writeFile(JSON.stringify({ pid: process.pid, at: Date.now() }));
-      await fh.close();
-      return async () => fs.rm(lock, { force: true });
-    } catch (err) {
-      if (err.code !== 'EEXIST') throw err;
-      let stale = true;
-      try {
-        const info = JSON.parse(await fs.readFile(lock, 'utf8'));
-        if (info.pid && info.pid !== process.pid) {
-          try {
-            process.kill(info.pid, 0);
-            stale = false;
-          } catch {}
-        }
-      } catch {}
-      if (!stale) throw new QentimArtError(`another sync is running on ${dir}`, { code: 'ELOCKED' });
-      await fs.rm(lock, { force: true });
-    }
+  const key = path.resolve(dir);
+  if (inProcessLocks.has(key)) {
+    throw new QentimArtError(`another sync is running on ${dir} (this process)`, { code: 'ELOCKED' });
   }
-  throw new QentimArtError(`could not lock ${dir}`, { code: 'ELOCKED' });
+  inProcessLocks.add(key);
+  try {
+    const sd = path.join(dir, STATE_DIR);
+    await fs.mkdir(sd, { recursive: true });
+    const lock = path.join(sd, LOCK_FILE);
+    for (let i = 0; i < 2; i++) {
+      try {
+        const fh = await fs.open(lock, 'wx');
+        await fh.writeFile(JSON.stringify({ pid: process.pid, at: Date.now() }));
+        await fh.close();
+        return async () => {
+          inProcessLocks.delete(key);
+          await fs.rm(lock, { force: true });
+        };
+      } catch (err) {
+        if (err.code !== 'EEXIST') throw err;
+        let stale = true;
+        try {
+          const info = JSON.parse(await fs.readFile(lock, 'utf8'));
+          if (info.pid && info.pid !== process.pid) {
+            try {
+              process.kill(info.pid, 0);
+              stale = false;
+            } catch {}
+          }
+        } catch {}
+        if (!stale) throw new QentimArtError(`another sync is running on ${dir}`, { code: 'ELOCKED' });
+        await fs.rm(lock, { force: true }); // 只清理陈旧锁文件，保留进程内持有
+      }
+    }
+    throw new QentimArtError(`could not lock ${dir}`, { code: 'ELOCKED' });
+  } catch (err) {
+    inProcessLocks.delete(key);
+    throw err;
+  }
 }
 
 // ---------------------------------------------------------------- 计划
@@ -464,27 +481,29 @@ async function applyWave(client, dir, opts, tasks, sources, stats, newTracked, w
   }
 }
 
+// 逐段创建父目录，绝不跟随符号链接：若某个已存在的祖先是符号链接，拒绝写入，
+// 以免清单路径合法但本地父目录指向 root 之外时，rename 把文件写到 root 外（逃逸）。
 async function ensureParent(dir, rel, deleteSet, policy) {
   const parent = path.posix.dirname(rel);
   if (parent === '.') return;
-  try {
-    await fs.mkdir(path.join(dir, parent), { recursive: true });
-    return;
-  } catch (err) {
-    if (!['EEXIST', 'ENOTDIR'].includes(err.code)) throw err;
-  }
-  // 需要目录的位置上存在一个文件（例如 "a" -> "a/b"）。
   const segs = parent.split('/');
   for (let i = 1; i <= segs.length; i++) {
     const p = segs.slice(0, i).join('/');
-    const st = await fs.lstat(path.join(dir, p)).catch(() => null);
+    const abs = path.join(dir, p);
+    const st = await fs.lstat(abs).catch(() => null);
+    if (st && st.isSymbolicLink()) {
+      throw new QentimArtError(`unsafe path ${rel}: '${p}' is a symlink`, { code: 'EUNSAFE' });
+    }
     if (st && !st.isDirectory()) {
+      // 该位置是普通文件，但需要它是目录（例如 "a" -> "a/b"）。
       if (!deleteSet.has(p) && policy !== 'overwrite') throw new QentimArtError(`${p} is a file but ${rel} needs it to be a directory`);
-      await fs.rm(path.join(dir, p), { force: true });
+      await fs.rm(abs, { force: true });
       deleteSet.delete(p);
+      await fs.mkdir(abs);
+    } else if (!st) {
+      await fs.mkdir(abs);
     }
   }
-  await fs.mkdir(path.join(dir, parent), { recursive: true });
 }
 
 // ---------------------------------------------------------------- 状态查询

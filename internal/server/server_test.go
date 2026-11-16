@@ -195,3 +195,83 @@ func TestPublishDedupFetchGC(t *testing.T) {
 	}
 	resp.Body.Close()
 }
+
+// setupGrace 构建一个带指定 GC 宽限期的测试服务器。
+func setupGrace(t *testing.T, grace string) *httptest.Server {
+	store, err := storage.NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := server.Config{Tokens: []server.TokenConfig{
+		{Token: pubTok, Role: "publish", Projects: []string{"*"}},
+		{Token: adminTok, Role: "admin", Projects: []string{"*"}},
+	}, GCGrace: grace}
+	srv, err := server.New(cfg, store, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+// uploadOrphanChunk 上传一个不被任何版本引用的块（模拟“发布端已上传块、但版本还没提交”）。
+func uploadOrphanChunk(t *testing.T, pc *publish.Client, raw []byte) {
+	t.Helper()
+	h := wire.Sum(raw)
+	frame := make([]byte, wire.FrameHeaderLen+len(raw))
+	wire.FrameHeader{Hash: h, Enc: wire.EncRaw, RawLen: uint32(len(raw)), StoredLen: uint32(len(raw))}.Put(frame)
+	copy(frame[wire.FrameHeaderLen:], raw)
+	var up struct {
+		Stored int `json:"stored"`
+	}
+	if err := pc.JSON(context.Background(), "POST", "/chunks", frame, &up); err != nil {
+		t.Fatal(err)
+	}
+	if up.Stored != 1 {
+		t.Fatalf("expected to store 1 orphan chunk, got %d", up.Stored)
+	}
+}
+
+func gcDeleted(t *testing.T, ac *publish.Client) int {
+	t.Helper()
+	var gc struct {
+		DeletedChunks int `json:"deletedChunks"`
+	}
+	if err := ac.JSON(context.Background(), "POST", "/gc", nil, &gc); err != nil {
+		t.Fatal(err)
+	}
+	return gc.DeletedChunks
+}
+
+// 宽限期必须保护最近上传、尚未被任何版本引用的块（防止与并发发布互删）。
+func TestGCGraceProtectsUncommittedChunks(t *testing.T) {
+	ctx := context.Background()
+	src := t.TempDir()
+	writeFile(t, filepath.Join(src, "a.bin"), bytes.Repeat([]byte("committed-data"), 2000))
+	orphan := []byte("an uncommitted chunk that no version references yet")
+
+	// 宽限期足够长：孤块（未提交）必须保留。
+	ts := setupGrace(t, "1h")
+	pc := publish.NewClient(ts.URL, "game", pubTok, 2)
+	ac := publish.NewClient(ts.URL, "game", adminTok, 1)
+	if _, err := publish.Run(ctx, pc, publish.Options{Dir: src, Version: "1.0.0"}); err != nil {
+		t.Fatal(err)
+	}
+	uploadOrphanChunk(t, pc, orphan)
+	if n := gcDeleted(t, ac); n != 0 {
+		t.Fatalf("gc within grace deleted %d chunk(s); recent uncommitted chunks must be protected", n)
+	}
+
+	// 宽限期为 0：同样的孤块必须被回收（已提交版本的块因被引用而保留）。
+	ts0 := setupGrace(t, "0s")
+	pc0 := publish.NewClient(ts0.URL, "game", pubTok, 2)
+	ac0 := publish.NewClient(ts0.URL, "game", adminTok, 1)
+	if _, err := publish.Run(ctx, pc0, publish.Options{Dir: src, Version: "1.0.0"}); err != nil {
+		t.Fatal(err)
+	}
+	uploadOrphanChunk(t, pc0, orphan)
+	if n := gcDeleted(t, ac0); n != 1 {
+		t.Fatalf("gc with zero grace should delete exactly the 1 orphan chunk, got %d", n)
+	}
+}

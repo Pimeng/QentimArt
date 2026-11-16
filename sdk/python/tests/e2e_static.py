@@ -6,6 +6,7 @@
 usage: e2e_static.py SITE_DIR DEST tree1.json tree2.json DELTA_BYTES
 """
 import functools
+import gzip
 import hashlib
 import http.server
 import json
@@ -15,7 +16,7 @@ import socketserver
 import sys
 import threading
 
-from qentimart import QentimArtClient
+from qentimart import QentimArtClient, QentimArtError
 
 MiB = 1 << 20
 failures = 0
@@ -52,6 +53,24 @@ class _Quiet(http.server.SimpleHTTPRequestHandler):
         pass
 
 
+def _craft_evil_tree(root, file_path):
+    """伪造一棵只含单个空文件（路径为 file_path）的静态树，用于测试消费端路径安全。"""
+    empty = hashlib.sha256(b"").hexdigest()
+    meta = {"version": "1.0.0", "createdAt": "2026-01-01T00:00:00Z", "prerelease": False,
+            "fileCount": 1, "totalSize": 0, "chunkCount": 0, "manifestSize": 0, "baseVersion": "", "deltaBytes": 0}
+    manifest = {"formatVersion": 1, "version": "1.0.0", "createdAt": meta["createdAt"],
+                "files": [{"path": file_path, "size": 0, "hash": empty}]}
+    index = {"formatVersion": 1, "project": "evil", "updatedAt": meta["createdAt"],
+             "latest": "1.0.0", "latestPrerelease": None, "versions": [meta]}
+    os.makedirs(os.path.join(root, "versions", "1.0.0"), exist_ok=True)
+    with open(os.path.join(root, "index.json"), "w", encoding="utf-8") as f:
+        json.dump(index, f)
+    with open(os.path.join(root, "versions", "1.0.0", "meta.json"), "w", encoding="utf-8") as f:
+        json.dump(meta, f)
+    with open(os.path.join(root, "versions", "1.0.0", "manifest.json.gz"), "wb") as f:
+        f.write(gzip.compress(json.dumps(manifest).encode("utf-8")))
+
+
 def main():
     site, dest, t1, t2, delta = sys.argv[1:6]
     delta = int(delta)
@@ -84,6 +103,38 @@ def main():
 
         d = c.diff("1.0.0", "1.1.0")
         check(d["downloadBytes"] > 0 and (len(d["added"]) + len(d["modified"])) > 0, "静态模式客户端 diff 可用")
+
+    # 消费端路径安全：清单路径合法，但本地父目录是指向外部的符号链接 → 必须拒绝，不逃逸。
+    evil = dest + "-evil-symlink"
+    shutil.rmtree(evil, ignore_errors=True)
+    _craft_evil_tree(evil, "sub/empty.txt")
+    ehandler = functools.partial(_Quiet, directory=evil)
+    ehttpd = socketserver.ThreadingTCPServer(("127.0.0.1", 0), ehandler)
+    ehttpd.daemon_threads = True
+    threading.Thread(target=ehttpd.serve_forever, daemon=True).start()
+    eurl = "http://127.0.0.1:%d" % ehttpd.server_address[1]
+    edst = dest + "-escape"
+    out = dest + "-escape-out"
+    shutil.rmtree(edst, ignore_errors=True)
+    shutil.rmtree(out, ignore_errors=True)
+    os.makedirs(edst)
+    os.makedirs(out)
+    symlinked = True
+    try:
+        os.symlink(out, os.path.join(edst, "sub"), target_is_directory=True)
+    except (OSError, NotImplementedError, AttributeError):
+        symlinked = False
+    if not symlinked:
+        print("  skip  符号链接父目录逃逸（本机无权限创建符号链接）", flush=True)
+    else:
+        threw = False
+        try:
+            with QentimArtClient(base_url=eurl) as ec:
+                ec.sync(edst)
+        except QentimArtError as e:
+            threw = e.code == "EUNSAFE" or "symlink" in str(e) or "unsafe" in str(e)
+        check(threw and len(os.listdir(out)) == 0, "符号链接父目录不会让写入逃逸到 root 外")
+    ehttpd.shutdown()
 
     httpd.shutdown()
     sys.exit(1 if failures else 0)

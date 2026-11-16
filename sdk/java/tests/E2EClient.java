@@ -1,6 +1,7 @@
 package qentimart.e2e;
 
 import qentimart.QentimArtClient;
+import qentimart.QentimArtException;
 import qentimart.StorageReport;
 import qentimart.SyncConflictException;
 import qentimart.SyncOptions;
@@ -106,6 +107,43 @@ public class E2EClient {
             check(Files.exists(Paths.get(wrong).resolve("important/user-file.doc"))
                             && r.files.kept.contains("important/user-file.doc"),
                     "first sync never deletes unknown files (deleteUntrackedOnFirstSync=false)");
+
+            // --- 可靠性 ---
+            String lockDir = dest + "-rel";
+            deleteTree(Paths.get(lockDir));
+            c.sync(lockDir, new SyncOptions().version("1.0.0"));
+            // 进程内并发互斥：同进程两个线程并发 sync 同目录，恰有其一 ELOCKED。
+            List<String> results = Collections.synchronizedList(new ArrayList<>());
+            Runnable one = () -> {
+                try {
+                    c.sync(lockDir, new SyncOptions().version("1.0.0"));
+                    results.add("ok");
+                } catch (QentimArtException e) {
+                    results.add(e.code == null ? "err" : e.code);
+                }
+            };
+            Thread th1 = new Thread(one);
+            Thread th2 = new Thread(one);
+            th1.start();
+            th2.start();
+            th1.join();
+            th2.join();
+            long locked = results.stream().filter("ELOCKED"::equals).count();
+            long okc = results.stream().filter("ok"::equals).count();
+            check(locked == 1 && okc == 1, "in-process concurrent sync of same dir: exactly one ELOCKED " + results);
+
+            // 静默损坏自愈：翻转一个字节 → verify 报告 → 再 sync 复原。
+            java.util.TreeSet<String> keys = new java.util.TreeSet<>(tree1.keySet());
+            String victim2 = keys.stream().filter(k -> k.startsWith("ui/")).findFirst().orElse(keys.first());
+            Path vp = Paths.get(lockDir).resolve(victim2);
+            byte[] data = Files.readAllBytes(vp);
+            data[0] ^= 0xff;
+            Files.write(vp, data);
+            Map<String, Object> vr = c.verify(lockDir);
+            check(Boolean.FALSE.equals(vr.get("ok")) && ((List<?>) vr.get("corrupted")).contains(victim2),
+                    "verify detects silent corruption (" + victim2 + ")");
+            c.sync(lockDir, new SyncOptions().version("1.0.0"));
+            check(Boolean.TRUE.equals(c.verify(lockDir).get("ok")), "sync heals the corrupted file");
         }
 
         String fresh = dest + "-fresh";

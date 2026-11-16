@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import stat
 import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Set
@@ -168,33 +169,42 @@ def _apply_wave(client, root, policy, wave, tmps, handles, sources, stats, new_t
 
 
 def _ensure_parent(root: str, rel: str, delete_set: Set[str], policy: str) -> None:
+    """逐段创建父目录，绝不跟随符号链接：若某个已存在的祖先是符号链接，拒绝写入，
+    以免清单路径合法但本地父目录指向 root 之外时，替换操作把文件写到 root 外（逃逸）。"""
     parent = rel.rsplit("/", 1)[0] if "/" in rel else ""
     if not parent:
         return
-    try:
-        os.makedirs(os.path.join(root, parent), exist_ok=True)
-        return
-    except (FileExistsError, NotADirectoryError):
-        pass
-    # 需要目录的位置上存在一个文件（例如 "a" -> "a/b"）。
     segs = parent.split("/")
     for i in range(1, len(segs) + 1):
         p = "/".join(segs[:i])
         ap = os.path.join(root, p)
-        if os.path.lexists(ap) and not os.path.isdir(ap):
+        try:
+            st = os.lstat(ap)
+        except FileNotFoundError:
+            st = None
+        if st is not None and stat.S_ISLNK(st.st_mode):
+            raise QentimArtError("unsafe path %s: %r is a symlink" % (rel, p), code="EUNSAFE")
+        if st is not None and not stat.S_ISDIR(st.st_mode):
+            # 该位置是普通文件，但需要它是目录（例如 "a" -> "a/b"）。
             if p not in delete_set and policy != "overwrite":
                 raise QentimArtError("%s is a file but %s needs it to be a directory" % (p, rel))
             os.remove(ap)
             delete_set.discard(p)
-    os.makedirs(os.path.join(root, parent), exist_ok=True)
+            os.mkdir(ap)
+        elif st is None:
+            os.mkdir(ap)
 
 
 def delete_files(root: str, paths: List[str]) -> None:
     """删除操作放在最后执行，以便被删除的文件仍可作为块来源。"""
     for p in paths:
         ap = os.path.join(root, p)
-        # 该路径可能已不存在，或已变为目标版本中的目录（文件 -> 目录）。
-        if not os.path.lexists(ap) or os.path.isdir(ap):
+        try:
+            st = os.lstat(ap)  # 不跟随符号链接
+        except FileNotFoundError:
+            continue
+        # 真实目录（已变为目标版本中的目录，文件 -> 目录）跳过；符号链接按条目本身删除。
+        if stat.S_ISDIR(st.st_mode):
             continue
         os.remove(ap)
         prune_empty_dirs(root, p)
