@@ -1,9 +1,9 @@
-// Command assetsync-server 是 AssetSync 的服务端。
+// Command qentimart-server 是 QentimArt 的服务端。
 //
-//	assetsync-server serve     -config server.json [-listen :8080]
-//	assetsync-server gen-token
+//	qentimart-server serve     -config server.json [-listen :8080]
+//	qentimart-server gen-token
 //
-// 发布与查询等客户端操作请使用 assetsync 命令。
+// 发布与查询等客户端操作请使用 qentimart 命令。
 package main
 
 import (
@@ -19,19 +19,19 @@ import (
 	"os/signal"
 	"time"
 
-	"assetsync/internal/server"
-	"assetsync/internal/storage"
+	"qentimart/internal/server"
+	"qentimart/internal/storage"
 )
 
 var version = "0.1.0"
 
-const usage = `AssetSync 服务端 %s
+const usage = `QentimArt 服务端 %s
 
 用法:
-  assetsync-server serve     -config server.json [-listen :8080]
-  assetsync-server gen-token                      生成一个随机令牌，填入配置文件
+  qentimart-server serve     -config server.json [-listen :8080]
+  qentimart-server gen-token                      生成一个随机令牌，填入配置文件
 
-发布与查询等客户端操作请使用 assetsync 命令。
+发布与查询等客户端操作请使用 qentimart 命令。
 `
 
 func main() {
@@ -97,7 +97,7 @@ func cmdServe(ctx context.Context, args []string) error {
 		defer cancel()
 		hs.Shutdown(sctx)
 	}()
-	logger.Printf("assetsync-server %s listening on %s (storage: %s)", version, cfg.Listen, storageDesc(cfg.Storage))
+	logger.Printf("qentimart-server %s listening on %s (storage: %s)", version, cfg.Listen, storageDesc(cfg.Storage))
 	if err := hs.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}

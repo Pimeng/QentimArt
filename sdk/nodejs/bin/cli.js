@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-// assetsync-node：基于 Node.js SDK 的命令行封装。
+// qentimart-node：基于 Node.js SDK 的命令行封装。
 import { parseArgs } from 'node:util';
-import { AssetSyncClient, SyncConflictError } from '../src/index.js';
+import { QentimArtClient, SyncConflictError } from '../src/index.js';
 
-const HELP = `assetsync-node <command> [options]
+const HELP = `qentimart-node <command> [options]
 
 命令：
   sync      --dir DIR [--version latest] [--local-changes overwrite|keep|fail] [--prerelease] [--verify-all] [--delete-untracked-on-first-sync]
@@ -13,7 +13,7 @@ const HELP = `assetsync-node <command> [options]
   versions                                        列出服务器上的版本
   report    --dir DIR                             存储额外开销比例
 
-连接（动态）：--server URL --project NAME --token TOKEN  （或 ASSETSYNC_SERVER / ASSETSYNC_PROJECT / ASSETSYNC_TOKEN）
+连接（动态）：--server URL --project NAME --token TOKEN  （或 QENTIMART_SERVER / QENTIMART_PROJECT / QENTIMART_TOKEN）
 连接（静态）：--base-url https://game.pages.dev          （只读、无需鉴权）
 调优：--concurrency 8
 输出：--json  输出机器可读的结果
@@ -22,10 +22,10 @@ const HELP = `assetsync-node <command> [options]
 const { values, positionals } = parseArgs({
   allowPositionals: true,
   options: {
-    server: { type: 'string', default: process.env.ASSETSYNC_SERVER },
-    project: { type: 'string', default: process.env.ASSETSYNC_PROJECT },
-    token: { type: 'string', default: process.env.ASSETSYNC_TOKEN },
-    'base-url': { type: 'string', default: process.env.ASSETSYNC_BASE_URL },
+    server: { type: 'string', default: process.env.QENTIMART_SERVER },
+    project: { type: 'string', default: process.env.QENTIMART_PROJECT },
+    token: { type: 'string', default: process.env.QENTIMART_TOKEN },
+    'base-url': { type: 'string', default: process.env.QENTIMART_BASE_URL },
     dir: { type: 'string' },
     version: { type: 'string', default: 'latest' },
     'local-changes': { type: 'string', default: 'overwrite' },
@@ -69,12 +69,12 @@ const out = (obj, text) => {
 
 async function main() {
   if (cmd === 'report') {
-    const r = await AssetSyncClient.storageReport(need('dir'));
+    const r = await QentimArtClient.storageReport(need('dir'));
     return out(r, `assets ${fmt(r.assetBytes)}, overhead ${fmt(r.overheadBytes)}, ratio ${(r.ratio * 100).toFixed(3)}%`);
   }
   const client = values['base-url']
-    ? new AssetSyncClient({ baseUrl: values['base-url'], project: values.project, concurrency: Number(values.concurrency) })
-    : new AssetSyncClient({ server: need('server'), project: need('project'), token: values.token, concurrency: Number(values.concurrency) });
+    ? new QentimArtClient({ baseUrl: values['base-url'], project: values.project, concurrency: Number(values.concurrency) })
+    : new QentimArtClient({ server: need('server'), project: need('project'), token: values.token, concurrency: Number(values.concurrency) });
   try {
     switch (cmd) {
       case 'versions': {

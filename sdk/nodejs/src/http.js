@@ -1,10 +1,10 @@
 import http from 'node:http';
 import https from 'node:https';
 
-export class AssetSyncError extends Error {
+export class QentimArtError extends Error {
   constructor(message, { status, code, cause } = {}) {
     super(message, cause ? { cause } : undefined);
-    this.name = 'AssetSyncError';
+    this.name = 'QentimArtError';
     this.status = status;
     this.code = code;
   }
@@ -61,7 +61,7 @@ export class HttpClient {
               try {
                 msg = JSON.parse(msg).error || msg;
               } catch {}
-              reject(new AssetSyncError(`${method} ${path}: HTTP ${res.statusCode}: ${msg}`, { status: res.statusCode }));
+              reject(new QentimArtError(`${method} ${path}: HTTP ${res.statusCode}: ${msg}`, { status: res.statusCode }));
             });
             res.on('error', reject);
             return;
@@ -69,7 +69,7 @@ export class HttpClient {
           resolve(res);
         },
       );
-      req.setTimeout(this.timeoutMs, () => req.destroy(new AssetSyncError(`${method} ${path}: timeout`, { code: 'ETIMEDOUT' })));
+      req.setTimeout(this.timeoutMs, () => req.destroy(new QentimArtError(`${method} ${path}: timeout`, { code: 'ETIMEDOUT' })));
       req.on('error', reject);
       req.end(body);
     });
@@ -93,13 +93,13 @@ export class HttpClient {
   async withRetry(fn, signal) {
     let lastErr;
     for (let attempt = 0; attempt <= this.retries; attempt++) {
-      if (signal?.aborted) throw signal.reason ?? new AssetSyncError('aborted', { code: 'ABORT_ERR' });
+      if (signal?.aborted) throw signal.reason ?? new QentimArtError('aborted', { code: 'ABORT_ERR' });
       try {
         return await fn(attempt);
       } catch (err) {
         lastErr = err;
         if (err?.name === 'AbortError' || signal?.aborted) throw err;
-        if (err instanceof AssetSyncError && err.status && err.status < 500) throw err;
+        if (err instanceof QentimArtError && err.status && err.status < 500) throw err;
         if (attempt < this.retries) await sleep(300 * 2 ** attempt);
       }
     }

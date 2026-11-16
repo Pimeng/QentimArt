@@ -8,7 +8,7 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Set
 
-from ._errors import AssetSyncError
+from ._errors import QentimArtError
 from ._localfs import RandomAccessFile, mtime_ms, prune_empty_dirs, replace_retry, run_pool
 from ._plan import Plan, SourceIndex, WriteTask
 from ._wire import STATE_DIR
@@ -34,7 +34,7 @@ class _Need:
 
 def _check_cancel(cancel: Optional[threading.Event]) -> None:
     if cancel is not None and cancel.is_set():
-        raise AssetSyncError("sync cancelled", code="ECANCELED")
+        raise QentimArtError("sync cancelled", code="ECANCELED")
 
 
 def _waves(tasks: List[WriteTask], max_bytes: int, max_files: int) -> List[List[WriteTask]]:
@@ -162,7 +162,7 @@ def _apply_wave(client, root, policy, wave, tmps, handles, sources, stats, new_t
         try:
             replace_retry(tmps[i], target)
         except OSError as e:
-            raise AssetSyncError("cannot replace %s (is it open in another program?): %s" % (w.t.path, e))
+            raise QentimArtError("cannot replace %s (is it open in another program?): %s" % (w.t.path, e))
         new_tracked[w.t.path] = mtime_ms(target)
         sources.replaced(w.t.path, w.t.chunks)
 
@@ -183,7 +183,7 @@ def _ensure_parent(root: str, rel: str, delete_set: Set[str], policy: str) -> No
         ap = os.path.join(root, p)
         if os.path.lexists(ap) and not os.path.isdir(ap):
             if p not in delete_set and policy != "overwrite":
-                raise AssetSyncError("%s is a file but %s needs it to be a directory" % (p, rel))
+                raise QentimArtError("%s is a file but %s needs it to be a directory" % (p, rel))
             os.remove(ap)
             delete_set.discard(p)
     os.makedirs(os.path.join(root, parent), exist_ok=True)

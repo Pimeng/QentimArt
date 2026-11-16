@@ -1,6 +1,6 @@
 <div align="center">
 
-# AssetSync
+# QentimArt
 
 **面向游戏素材的高吞吐版本分发系统**
 
@@ -18,11 +18,11 @@
 
 ---
 
-## 为什么需要 AssetSync
+## 为什么需要 QentimArt
 
 用 git 管理游戏素材，`.git` 目录会为每个版本保存一份完整副本，越用越大；git-lfs 在本地还要再缓存一份，下游磁盘占用直接翻倍。二进制素材也没法 diff，改一个像素就要重新存储、重新传输整个文件。
 
-AssetSync 换了一种做法：
+QentimArt 换了一种做法：
 
 - **服务器**把文件按内容切成块，相同的块只存一份。每个游戏版本只是一份清单，新版本只增加改动过的块。
 - **下游**只保留素材本身和一个很小的元数据目录。更新时只下载变化的块，文件移动、大文件局部修改时直接复用本地已有的数据。
@@ -45,8 +45,8 @@ AssetSync 换了一种做法：
 
 ```
 ┌──────────────────┐  publish   ┌──────────────────────┐   sync    ┌─────────────────────┐
-│ CI / 发布机       │ ─────────▶ │ assetsync-server     │ ────────▶ │ 编辑器插件 / 工具    │
-│ assetsync (客户端)│  只传新块   │ 本地磁盘 或 S3        │  只拉差异  │ Node.js / Python SDK │
+│ CI / 发布机       │ ─────────▶ │ qentimart-server     │ ────────▶ │ 编辑器插件 / 工具    │
+│ qentimart (客户端)│  只传新块   │ 本地磁盘 或 S3        │  只拉差异  │ Node.js / Python SDK │
 └──────────────────┘            └──────────────────────┘           └─────────────────────┘
 ```
 
@@ -59,17 +59,17 @@ AssetSync 换了一种做法：
 ## 快速上手
 
 ```bash
-go build -o bin/ ./cmd/assetsync-server ./cmd/assetsync && bin/assetsync-server serve -config examples/server.json
+go build -o bin/ ./cmd/qentimart-server ./cmd/qentimart && bin/qentimart-server serve -config examples/server.json
 ```
 
 ```bash
-bin/assetsync publish -server http://127.0.0.1:8080 -project mygame -token <publish token> -version 1.0.0 ./Assets
+bin/qentimart publish -server http://127.0.0.1:8080 -project mygame -token <publish token> -version 1.0.0 ./Assets
 ```
 
 ```js
-import { AssetSyncClient } from '@assetsync/sdk';
+import { QentimArtClient } from '@qentimart/sdk';
 
-const client = new AssetSyncClient({ server: 'http://127.0.0.1:8080', project: 'mygame', token });
+const client = new QentimArtClient({ server: 'http://127.0.0.1:8080', project: 'mygame', token });
 await client.sync('./assets');
 ```
 
@@ -100,8 +100,8 @@ Windows 11，12 核，服务端与客户端在同一台机器，3 GB / 1.26 万�
 ## 项目结构
 
 ```
-cmd/assetsync-server/  服务端（serve、gen-token）
-cmd/assetsync/         客户端（publish、versions、diff、gc 等）
+cmd/qentimart-server/  服务端（serve、gen-token）
+cmd/qentimart/         客户端（publish、versions、diff、gc 等）
 internal/              分块、清单、存储（本地 / S3）、HTTP 服务、发布流程
 sdk/nodejs/            Node.js SDK、命令行、插件接入示例
 sdk/python/            Python SDK、命令行、示例

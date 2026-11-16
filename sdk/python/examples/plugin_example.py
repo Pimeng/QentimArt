@@ -1,20 +1,20 @@
-"""示例：将 AssetSync 集成到 Python 工具 / 编辑器插件中。
+"""示例：将 QentimArt 集成到 Python 工具 / 编辑器插件中。
 
-    ASSETSYNC_SERVER=http://127.0.0.1:8080 ASSETSYNC_PROJECT=mygame \
-    ASSETSYNC_TOKEN=... python examples/plugin_example.py ./assets
+    QENTIMART_SERVER=http://127.0.0.1:8080 QENTIMART_PROJECT=mygame \
+    QENTIMART_TOKEN=... python examples/plugin_example.py ./assets
 """
 import os
 import sys
 import threading
 
-from assetsync import AssetSyncClient, AssetSyncError, SyncConflictError
+from qentimart import QentimArtClient, QentimArtError, SyncConflictError
 
 target_dir = sys.argv[1] if len(sys.argv) > 1 else "./assets"
 
-client = AssetSyncClient(
-    os.environ.get("ASSETSYNC_SERVER", "http://127.0.0.1:8080"),
-    os.environ.get("ASSETSYNC_PROJECT", "mygame"),
-    token=os.environ.get("ASSETSYNC_TOKEN"),  # 只读 token 即可
+client = QentimArtClient(
+    os.environ.get("QENTIMART_SERVER", "http://127.0.0.1:8080"),
+    os.environ.get("QENTIMART_PROJECT", "mygame"),
+    token=os.environ.get("QENTIMART_TOKEN"),  # 只读 token 即可
     concurrency=8,
 )
 
@@ -50,7 +50,7 @@ try:
 except SyncConflictError as e:
     print("locally modified files:", e.conflicts)
     sys.exit(1)
-except AssetSyncError as e:
+except QentimArtError as e:
     print("sync failed:", e)
     sys.exit(1)
 finally:

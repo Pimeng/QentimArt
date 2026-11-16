@@ -8,7 +8,7 @@ import os
 import shutil
 import sys
 
-from assetsync import AssetSyncClient, SyncConflictError
+from qentimart import QentimArtClient, SyncConflictError
 
 MiB = 1 << 20
 failures = 0
@@ -27,8 +27,8 @@ def tree(root):
         rel_base = os.path.relpath(base, root).replace(os.sep, "/")
         if rel_base == ".":
             rel_base = ""
-            if ".assetsync" in dirs:
-                dirs.remove(".assetsync")
+            if ".qentimart" in dirs:
+                dirs.remove(".qentimart")
         for n in names:
             rel = rel_base + "/" + n if rel_base else n
             with open(os.path.join(base, n), "rb") as f:
@@ -49,11 +49,11 @@ def main():
         tree2 = json.load(f)
     shutil.rmtree(dest, ignore_errors=True)
 
-    with AssetSyncClient(server, project, token=token, concurrency=8) as c:
+    with QentimArtClient(server, project, token=token, concurrency=8) as c:
         r = c.sync(dest, version="1.0.0")
         print("  fresh sync 1.0.0: %s in %.2fs = %s/s" % (mib(r["bytes"]["downloaded_wire"]), r["elapsed_ms"] / 1000, mib(r["bytes_per_second"])))
         check(tree(dest) == tree1, "fresh sync is byte-identical to 1.0.0")
-        rep = AssetSyncClient.storage_report(dest)
+        rep = QentimArtClient.storage_report(dest)
         check(rep["ratio"] <= 1.10, "storage ratio after fresh sync %.3f%% <= 110%%" % (rep["ratio"] * 100))
 
         r = c.sync(dest)
@@ -63,7 +63,7 @@ def main():
         check(tree(dest) == tree2, "incremental update is byte-identical to 1.1.0")
         check(b["downloaded_raw"] <= delta + MiB, "update downloads only the delta (%s <= %s + 1MiB)" % (mib(b["downloaded_raw"]), mib(delta)))
         check(b["reused_local"] > 0, "unchanged chunks of modified/moved files are copied locally")
-        rep = AssetSyncClient.storage_report(dest)
+        rep = QentimArtClient.storage_report(dest)
         check(rep["ratio"] <= 1.10, "storage ratio after update %.3f%% <= 110%%" % (rep["ratio"] * 100))
 
         r = c.sync(dest)
@@ -107,7 +107,7 @@ def main():
 
     fresh = dest + "-fresh"
     shutil.rmtree(fresh, ignore_errors=True)
-    with AssetSyncClient(server, project, token=token, concurrency=16) as c:
+    with QentimArtClient(server, project, token=token, concurrency=16) as c:
         r = c.sync(fresh)
         secs = r["elapsed_ms"] / 1000
         print("  throughput (fresh %s, concurrency 16): %s in %.2fs = %s/s" % (r["version"], mib(r["bytes"]["written"]), secs, mib(r["bytes"]["written"] / max(secs, 0.001))))

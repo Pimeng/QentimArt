@@ -1,6 +1,6 @@
 import http from 'node:http';
 import https from 'node:https';
-import { AssetSyncError } from './http.js';
+import { QentimArtError } from './http.js';
 import { pool } from './localfs.js';
 import { decodeBlob } from './frames.js';
 
@@ -43,7 +43,7 @@ export class StaticTransport {
         (res) => {
           if (res.statusCode >= 300) {
             res.resume();
-            reject(new AssetSyncError(`GET ${relPath}: HTTP ${res.statusCode}`, { status: res.statusCode }));
+            reject(new QentimArtError(`GET ${relPath}: HTTP ${res.statusCode}`, { status: res.statusCode }));
             return;
           }
           const chunks = [];
@@ -52,7 +52,7 @@ export class StaticTransport {
           res.on('error', reject);
         },
       );
-      req.setTimeout(this.timeoutMs, () => req.destroy(new AssetSyncError(`GET ${relPath}: timeout`, { code: 'ETIMEDOUT' })));
+      req.setTimeout(this.timeoutMs, () => req.destroy(new QentimArtError(`GET ${relPath}: timeout`, { code: 'ETIMEDOUT' })));
       req.on('error', reject);
       req.end();
     });
@@ -61,13 +61,13 @@ export class StaticTransport {
   async getBuffer(relPath, signal) {
     let last;
     for (let attempt = 0; attempt <= this.retries; attempt++) {
-      if (signal?.aborted) throw signal.reason ?? new AssetSyncError('aborted', { code: 'ABORT_ERR' });
+      if (signal?.aborted) throw signal.reason ?? new QentimArtError('aborted', { code: 'ABORT_ERR' });
       try {
         return await this._get(relPath, signal);
       } catch (err) {
         last = err;
         if (err?.name === 'AbortError' || signal?.aborted) throw err;
-        if (err instanceof AssetSyncError && err.status && err.status < 500 && err.status !== 429) throw err;
+        if (err instanceof QentimArtError && err.status && err.status < 500 && err.status !== 429) throw err;
         if (attempt < this.retries) await sleep(300 * 2 ** attempt);
       }
     }

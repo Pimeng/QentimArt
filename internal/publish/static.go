@@ -14,16 +14,16 @@ import (
 	"sync/atomic"
 	"time"
 
-	"assetsync/internal/catalog"
-	"assetsync/internal/manifest"
-	"assetsync/internal/semver"
-	"assetsync/internal/storage"
-	"assetsync/internal/wire"
+	"qentimart/internal/catalog"
+	"qentimart/internal/manifest"
+	"qentimart/internal/semver"
+	"qentimart/internal/storage"
+	"qentimart/internal/wire"
 )
 
 // _headers 让 Cloudflare Pages（及兼容的托管）对不可变对象永久缓存，
 // 对唯一可变的 index.json 用短 TTL。
-const staticHeaders = `# AssetSync 静态分发缓存策略（Cloudflare Pages _headers 格式）
+const staticHeaders = `# QentimArt 静态分发缓存策略（Cloudflare Pages _headers 格式）
 /chunks/*
   Cache-Control: public, max-age=31536000, immutable
 /versions/*

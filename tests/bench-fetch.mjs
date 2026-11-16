@@ -2,11 +2,11 @@
 // 不涉及磁盘读写。用于将服务端/网络/CPU 吞吐量与磁盘写入速度区分开。
 //
 //   node tests/bench-fetch.mjs SERVER PROJECT TOKEN [VERSION] [CONCURRENCY]
-import { AssetSyncClient } from '../sdk/nodejs/src/index.js';
+import { QentimArtClient } from '../sdk/nodejs/src/index.js';
 import { parseFrames, decodeFrame } from '../sdk/nodejs/src/frames.js';
 
 const [server, project, token, version = 'latest', conc = '16'] = process.argv.slice(2);
-const client = new AssetSyncClient({ server, project, token, concurrency: Number(conc) });
+const client = new QentimArtClient({ server, project, token, concurrency: Number(conc) });
 const m = await client.fetchManifest(version);
 const sizes = new Map();
 for (const f of m.files.values()) for (const c of f.chunks) sizes.set(c.hash, c.size);

@@ -8,8 +8,8 @@ import (
 	"sort"
 	"time"
 
-	"assetsync/internal/semver"
-	"assetsync/internal/wire"
+	"qentimart/internal/semver"
+	"qentimart/internal/wire"
 )
 
 // IndexFormatVersion 是 index.json 的格式版本。

@@ -8,7 +8,7 @@ import time
 from typing import Any, Callable, Dict, Optional, Tuple
 from urllib.parse import quote, urlsplit
 
-from ._errors import AssetSyncError
+from ._errors import QentimArtError
 
 
 class HttpClient:
@@ -17,7 +17,7 @@ class HttpClient:
     def __init__(self, server: str, project: str, token: Optional[str], timeout: float = 60.0, retries: int = 3):
         u = urlsplit(server)
         if u.scheme not in ("http", "https") or not u.hostname:
-            raise AssetSyncError("invalid server URL %r" % server)
+            raise QentimArtError("invalid server URL %r" % server)
         self.https = u.scheme == "https"
         self.host = u.hostname
         self.port = u.port
@@ -81,7 +81,7 @@ class HttpClient:
                 msg = json.loads(msg).get("error", msg)
             except Exception:
                 pass
-            raise AssetSyncError("%s %s: HTTP %d: %s" % (method, path, resp.status, msg), status=resp.status)
+            raise QentimArtError("%s %s: HTTP %d: %s" % (method, path, resp.status, msg), status=resp.status)
         return resp
 
     def buffer(self, method: str, path: str, body: Optional[bytes] = None) -> Tuple[bytes, Any]:
@@ -104,10 +104,10 @@ class HttpClient:
         last: Optional[BaseException] = None
         for attempt in range(self.retries + 1):
             if cancel is not None and cancel.is_set():
-                raise AssetSyncError("sync cancelled", code="ECANCELED")
+                raise QentimArtError("sync cancelled", code="ECANCELED")
             try:
                 return fn(attempt)
-            except AssetSyncError as e:
+            except QentimArtError as e:
                 if (e.status is not None and e.status < 500) or e.code in ("ECANCELED", "ECONFLICT"):
                     raise
                 last = e
@@ -116,6 +116,6 @@ class HttpClient:
             self.drop_conn()
             if attempt < self.retries:
                 time.sleep(0.3 * (2 ** attempt))
-        if isinstance(last, AssetSyncError):
+        if isinstance(last, QentimArtError):
             raise last
-        raise AssetSyncError("request failed after %d attempts: %s" % (self.retries + 1, last), code="ENETWORK")
+        raise QentimArtError("request failed after %d attempts: %s" % (self.retries + 1, last), code="ENETWORK")

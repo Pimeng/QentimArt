@@ -13,14 +13,14 @@ import path from 'node:path';
 import net from 'node:net';
 import httpMod from 'node:http';
 import { fileURLToPath } from 'node:url';
-import { AssetSyncClient, SyncConflictError } from '../sdk/nodejs/src/index.js';
+import { QentimArtClient, SyncConflictError } from '../sdk/nodejs/src/index.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const WORK = path.join(ROOT, 'tests', '.work');
 const SIZE_MB = Number(process.env.E2E_SIZE_MB ?? 400);
 const EXT = process.platform === 'win32' ? '.exe' : '';
-const SERVER_EXE = path.join(WORK, 'assetsync-server' + EXT); // 服务端
-const EXE = path.join(WORK, 'assetsync' + EXT); // 客户端（发布 / 查询）
+const SERVER_EXE = path.join(WORK, 'qentimart-server' + EXT); // 服务端
+const EXE = path.join(WORK, 'qentimart' + EXT); // 客户端（发布 / 查询）
 const PUB = 'e2e-publish-token-0000000001';
 const READ = 'e2e-read-token-00000000000001';
 const PROJECT = 'e2e';
@@ -66,7 +66,7 @@ async function treeHashes(dir) {
   const out = new Map();
   const walk = async (abs, rel) => {
     for (const e of await fs.readdir(abs, { withFileTypes: true })) {
-      if (!rel && e.name === '.assetsync') continue;
+      if (!rel && e.name === '.qentimart') continue;
       const r = rel ? `${rel}/${e.name}` : e.name;
       const a = path.join(abs, e.name);
       if (e.isDirectory()) await walk(a, r);
@@ -174,7 +174,7 @@ async function main() {
   await fs.mkdir(WORK, { recursive: true });
 
   console.log('building server + client...');
-  run('go', ['build', '-o', WORK + path.sep, './cmd/assetsync-server', './cmd/assetsync'], { cwd: ROOT });
+  run('go', ['build', '-o', WORK + path.sep, './cmd/qentimart-server', './cmd/qentimart'], { cwd: ROOT });
 
   const port = await freePort();
   const server = `http://127.0.0.1:${port}`;
@@ -236,13 +236,13 @@ async function main() {
 
     // --------------------------------------------------- Node SDK
     console.log('\n== Node.js SDK');
-    const client = new AssetSyncClient({ server, project: PROJECT, token: READ, concurrency: 8 });
+    const client = new QentimArtClient({ server, project: PROJECT, token: READ, concurrency: 8 });
     const dst = path.join(WORK, 'node-dst');
 
     let r = await client.sync(dst, { version: '1.0.0' });
     console.log(`  fresh sync 1.0.0: ${fmt(r.bytes.downloadedWire)} in ${(r.elapsedMs / 1000).toFixed(2)}s = ${fmt(r.bytesPerSecond)}/s`);
     check(!sameTree(tree1, await treeHashes(dst)), 'fresh sync is byte-identical to 1.0.0');
-    let rep = await AssetSyncClient.storageReport(dst);
+    let rep = await QentimArtClient.storageReport(dst);
     check(rep.ratio <= 1.1, `storage ratio after fresh sync ${(rep.ratio * 100).toFixed(3)}% <= 110%`);
 
     r = await client.sync(dst);
@@ -251,7 +251,7 @@ async function main() {
     check(!sameTree(tree2, await treeHashes(dst)), 'incremental update is byte-identical to 1.1.0');
     check(r.bytes.downloadedRaw <= pub2.UploadedRaw + MiB, `update downloads only the delta (${fmt(r.bytes.downloadedRaw)} <= ${fmt(pub2.UploadedRaw)} + 1MiB)`);
     check(r.bytes.reusedLocal > 0, 'unchanged chunks of modified/moved files are copied locally');
-    rep = await AssetSyncClient.storageReport(dst);
+    rep = await QentimArtClient.storageReport(dst);
     check(rep.ratio <= 1.1, `storage ratio after update ${(rep.ratio * 100).toFixed(3)}% <= 110%`);
 
     r = await client.sync(dst);
@@ -293,7 +293,7 @@ async function main() {
 
     // 吞吐量：以高并发全新同步 latest
     const fresh = path.join(WORK, 'node-fresh');
-    const fast = new AssetSyncClient({ server, project: PROJECT, token: READ, concurrency: 16 });
+    const fast = new QentimArtClient({ server, project: PROJECT, token: READ, concurrency: 16 });
     r = await fast.sync(fresh);
     console.log(`  throughput (fresh 1.1.0, concurrency 16): ${fmt(r.bytes.written)} in ${(r.elapsedMs / 1000).toFixed(2)}s = ${fmt(r.bytes.written / (r.elapsedMs / 1000))}/s`);
     fast.close();
@@ -341,12 +341,12 @@ async function main() {
     await new Promise((r) => staticSrv.listen(0, '127.0.0.1', r));
     const baseUrl = `http://127.0.0.1:${staticSrv.address().port}`;
     try {
-      const sclient = new AssetSyncClient({ baseUrl, concurrency: 16 });
+      const sclient = new QentimArtClient({ baseUrl, concurrency: 16 });
       const sdst = path.join(WORK, 'static-dst');
       let sr = await sclient.sync(sdst, { version: '1.0.0' });
       console.log(`  静态全新同步 1.0.0: ${fmt(sr.bytes.downloadedWire)} in ${(sr.elapsedMs / 1000).toFixed(2)}s = ${fmt(sr.bytesPerSecond)}/s`);
       check(!sameTree(tree1, await treeHashes(sdst)), '静态模式全新同步逐字节一致 (1.0.0)');
-      let srep = await AssetSyncClient.storageReport(sdst);
+      let srep = await QentimArtClient.storageReport(sdst);
       check(srep.ratio <= 1.1, `静态模式 ratio ${(srep.ratio * 100).toFixed(3)}% <= 110%`);
       sr = await sclient.sync(sdst);
       check(sr.version === '1.1.0' && !sameTree(tree2, await treeHashes(sdst)), '静态模式增量更新逐字节一致 (1.1.0)');

@@ -20,10 +20,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"assetsync/internal/cdc"
-	"assetsync/internal/manifest"
-	"assetsync/internal/semver"
-	"assetsync/internal/wire"
+	"qentimart/internal/cdc"
+	"qentimart/internal/manifest"
+	"qentimart/internal/semver"
+	"qentimart/internal/wire"
 )
 
 // Options 配置一次发布。
@@ -470,7 +470,7 @@ func uploadBatch(ctx context.Context, c *Client, files []fileJob, locs map[wire.
 		}
 		pw.Close()
 	}()
-	resp, err := c.Do(ctx, "POST", "/chunks", pr, "application/x-assetsync-frames")
+	resp, err := c.Do(ctx, "POST", "/chunks", pr, "application/x-qentimart-frames")
 	pr.CloseWithError(errors.New("request finished"))
 	if err != nil {
 		return err

@@ -9,9 +9,9 @@ import struct
 import zlib
 from typing import Dict, Iterator, List, NamedTuple, Tuple
 
-from ._errors import AssetSyncError
+from ._errors import QentimArtError
 
-STATE_DIR = ".assetsync"
+STATE_DIR = ".qentimart"
 FRAME_HEADER_LEN = 41
 ENC_RAW = 0
 ENC_DEFLATE = 1
@@ -42,12 +42,12 @@ def iter_frames(resp) -> Iterator[Tuple[str, int, int, bytes]]:
     while True:
         if not fill(FRAME_HEADER_LEN):
             if len(buf) - pos:
-                raise AssetSyncError("truncated chunk stream", code="ETRUNCATED")
+                raise QentimArtError("truncated chunk stream", code="ETRUNCATED")
             return
         h, enc, raw_len, stored = _HDR.unpack_from(buf, pos)
         pos += FRAME_HEADER_LEN
         if not fill(stored):
-            raise AssetSyncError("truncated chunk stream", code="ETRUNCATED")
+            raise QentimArtError("truncated chunk stream", code="ETRUNCATED")
         payload = bytes(buf[pos:pos + stored])
         pos += stored
         yield h.hex(), enc, raw_len, payload
@@ -60,20 +60,20 @@ def decode_chunk(hash_hex: str, enc: int, raw_len: int, payload: bytes) -> bytes
         try:
             raw = zlib.decompress(payload, -15)
         except zlib.error as e:
-            raise AssetSyncError("chunk %s: bad deflate data: %s" % (hash_hex, e), code="ECORRUPT")
+            raise QentimArtError("chunk %s: bad deflate data: %s" % (hash_hex, e), code="ECORRUPT")
     elif enc == ENC_MISSING:
-        raise AssetSyncError("chunk %s is missing on the server" % hash_hex, code="EMISSING")
+        raise QentimArtError("chunk %s is missing on the server" % hash_hex, code="EMISSING")
     else:
-        raise AssetSyncError("unknown chunk encoding %d" % enc)
+        raise QentimArtError("unknown chunk encoding %d" % enc)
     if len(raw) != raw_len or hashlib.sha256(raw).hexdigest() != hash_hex:
-        raise AssetSyncError("chunk %s failed verification" % hash_hex, code="ECORRUPT")
+        raise QentimArtError("chunk %s failed verification" % hash_hex, code="ECORRUPT")
     return raw
 
 
 def decode_blob(hash_hex: str, buf: bytes) -> bytes:
     """解码一个静态 blob 对象（enc u8 | rawLen u32be | payload），校验哈希。"""
     if len(buf) < 5:
-        raise AssetSyncError("chunk %s: blob too short" % hash_hex, code="ECORRUPT")
+        raise QentimArtError("chunk %s: blob too short" % hash_hex, code="ECORRUPT")
     enc = buf[0]
     raw_len = int.from_bytes(buf[1:5], "big")
     return decode_chunk(hash_hex, enc, raw_len, buf[5:])
@@ -103,13 +103,13 @@ _DRIVE = re.compile(r"^[a-zA-Z]:$")
 
 def validate_path(p: str) -> None:
     if not isinstance(p, str) or not p or "\\" in p or "\0" in p:
-        raise AssetSyncError("unsafe path %r" % (p,))
+        raise QentimArtError("unsafe path %r" % (p,))
     segs = p.split("/")
     if segs[0].lower() == STATE_DIR:
-        raise AssetSyncError("unsafe path %r" % p)
+        raise QentimArtError("unsafe path %r" % p)
     for s in segs:
         if not s or s in (".", "..") or _DRIVE.match(s):
-            raise AssetSyncError("unsafe path %r" % p)
+            raise QentimArtError("unsafe path %r" % p)
 
 
 def diff_manifests(a: "Manifest", b: "Manifest") -> dict:
@@ -147,9 +147,9 @@ def parse_manifest(gz: bytes) -> Manifest:
     try:
         doc = json.loads(gzip.decompress(gz).decode("utf-8"))
     except Exception as e:
-        raise AssetSyncError("invalid manifest: %s" % e)
+        raise QentimArtError("invalid manifest: %s" % e)
     if doc.get("formatVersion") != 1:
-        raise AssetSyncError("unsupported manifest formatVersion %r" % doc.get("formatVersion"))
+        raise QentimArtError("unsupported manifest formatVersion %r" % doc.get("formatVersion"))
     files: Dict[str, ManifestFile] = {}
     for f in doc["files"]:
         path, size, fh = f["path"], int(f["size"]), f["hash"]
@@ -162,7 +162,7 @@ def parse_manifest(gz: bytes) -> Manifest:
                 chunks.append(Chunk(h, int(sz), off))
                 off += int(sz)
             if off != size:
-                raise AssetSyncError("manifest: chunk sizes of %s do not add up" % path)
+                raise QentimArtError("manifest: chunk sizes of %s do not add up" % path)
         elif size > 0:
             chunks.append(Chunk(fh, size, 0))
         files[path] = ManifestFile(path, size, fh, chunks)

@@ -1,15 +1,15 @@
 // 示例：编辑器插件（Cocos Creator / Electron / VS Code 风格）
-// 如何集成 AssetSync SDK。
+// 如何集成 QentimArt SDK。
 //
-//   ASSETSYNC_SERVER=http://127.0.0.1:8080 ASSETSYNC_PROJECT=mygame \
-//   ASSETSYNC_TOKEN=... node examples/plugin-example.mjs ./assets
-import { AssetSyncClient, SyncConflictError } from '../src/index.js';
+//   QENTIMART_SERVER=http://127.0.0.1:8080 QENTIMART_PROJECT=mygame \
+//   QENTIMART_TOKEN=... node examples/plugin-example.mjs ./assets
+import { QentimArtClient, SyncConflictError } from '../src/index.js';
 
 const dir = process.argv[2] ?? './assets';
-const client = new AssetSyncClient({
-  server: process.env.ASSETSYNC_SERVER ?? 'http://127.0.0.1:8080',
-  project: process.env.ASSETSYNC_PROJECT ?? 'mygame',
-  token: process.env.ASSETSYNC_TOKEN, // 插件使用只读 token 即可
+const client = new QentimArtClient({
+  server: process.env.QENTIMART_SERVER ?? 'http://127.0.0.1:8080',
+  project: process.env.QENTIMART_PROJECT ?? 'mygame',
+  token: process.env.QENTIMART_TOKEN, // 插件使用只读 token 即可
   concurrency: 8,
 });
 

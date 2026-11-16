@@ -10,10 +10,10 @@ import (
 	"sync"
 	"time"
 
-	"assetsync/internal/catalog"
-	"assetsync/internal/manifest"
-	"assetsync/internal/storage"
-	"assetsync/internal/wire"
+	"qentimart/internal/catalog"
+	"qentimart/internal/manifest"
+	"qentimart/internal/storage"
+	"qentimart/internal/wire"
 )
 
 // VersionInfo 是与每个 manifest 一起存储的元数据（类型定义在 catalog 包，

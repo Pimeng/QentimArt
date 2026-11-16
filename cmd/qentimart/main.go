@@ -1,9 +1,9 @@
-// Command assetsync 是 AssetSync 的客户端：把素材发布到服务端，并查询、管理版本。
+// Command qentimart 是 QentimArt 的客户端：把素材发布到服务端，并查询、管理版本。
 //
-//	assetsync publish -server URL -project P -token T -version 1.2.3 ./Assets
-//	assetsync versions | info | diff | delete-version | gc
+//	qentimart publish -server URL -project P -token T -version 1.2.3 ./Assets
+//	qentimart versions | info | diff | delete-version | gc
 //
-// 启动服务端请使用 assetsync-server 命令。
+// 启动服务端请使用 qentimart-server 命令。
 package main
 
 import (
@@ -16,34 +16,34 @@ import (
 	"os/signal"
 	"strings"
 
-	"assetsync/internal/catalog"
-	"assetsync/internal/cdc"
-	"assetsync/internal/publish"
-	"assetsync/internal/storage"
+	"qentimart/internal/catalog"
+	"qentimart/internal/cdc"
+	"qentimart/internal/publish"
+	"qentimart/internal/storage"
 )
 
 var version = "0.1.0"
 
-const usage = `AssetSync 客户端 %s
+const usage = `QentimArt 客户端 %s
 
 用法:
-  assetsync publish        [连接参数] -version 1.2.3 [-concurrency 8] [-compress auto|none] [-exclude glob,...] [-dry-run] DIR
-  assetsync versions       [连接参数]
-  assetsync info           [连接参数] -version latest
-  assetsync diff           [连接参数] -from 1.0.0 -to 1.1.0
-  assetsync delete-version [连接参数] -version 1.0.0
-  assetsync gc             [连接参数] [-dry-run]
+  qentimart publish        [连接参数] -version 1.2.3 [-concurrency 8] [-compress auto|none] [-exclude glob,...] [-dry-run] DIR
+  qentimart versions       [连接参数]
+  qentimart info           [连接参数] -version latest
+  qentimart diff           [连接参数] -from 1.0.0 -to 1.1.0
+  qentimart delete-version [连接参数] -version 1.0.0
+  qentimart gc             [连接参数] [-dry-run]
 
 静态模式（无需服务端，构建静态分发树到本地目录，再用 wrangler / rsync 部署）:
-  assetsync publish        --static -o DIR -version 1.2.3 [-chunk-avg 4194304] [-project NAME] SRC
-  assetsync versions       --static -o DIR
-  assetsync delete-version --static -o DIR -version 1.0.0
-  assetsync gc             --static -o DIR [-dry-run]
+  qentimart publish        --static -o DIR -version 1.2.3 [-chunk-avg 4194304] [-project NAME] SRC
+  qentimart versions       --static -o DIR
+  qentimart delete-version --static -o DIR -version 1.0.0
+  qentimart gc             --static -o DIR [-dry-run]
 
-连接参数（也可使用环境变量 ASSETSYNC_SERVER / ASSETSYNC_PROJECT / ASSETSYNC_TOKEN）:
+连接参数（也可使用环境变量 QENTIMART_SERVER / QENTIMART_PROJECT / QENTIMART_TOKEN）:
   -server URL   -project NAME   -token TOKEN
 
-启动服务端、生成令牌请使用 assetsync-server 命令。
+启动服务端、生成令牌请使用 qentimart-server 命令。
 `
 
 func main() {
@@ -85,9 +85,9 @@ type conn struct{ server, project, token *string }
 
 func connFlags(fs *flag.FlagSet) conn {
 	return conn{
-		server:  fs.String("server", os.Getenv("ASSETSYNC_SERVER"), "服务器 URL"),
-		project: fs.String("project", os.Getenv("ASSETSYNC_PROJECT"), "项目名称"),
-		token:   fs.String("token", os.Getenv("ASSETSYNC_TOKEN"), "API 令牌"),
+		server:  fs.String("server", os.Getenv("QENTIMART_SERVER"), "服务器 URL"),
+		project: fs.String("project", os.Getenv("QENTIMART_PROJECT"), "项目名称"),
+		token:   fs.String("token", os.Getenv("QENTIMART_TOKEN"), "API 令牌"),
 	}
 }
 
@@ -113,7 +113,7 @@ func cmdPublish(ctx context.Context, args []string) error {
 	maxC := fs.Int("chunk-max", cdc.Default.Max, "最大块大小")
 	fs.Parse(args)
 	if fs.NArg() != 1 || *ver == "" {
-		return errors.New("usage: assetsync publish [--static -o DIR] -version X.Y.Z [flags] DIR")
+		return errors.New("usage: qentimart publish [--static -o DIR] -version X.Y.Z [flags] DIR")
 	}
 	var ex []string
 	for _, e := range strings.Split(*exclude, ",") {

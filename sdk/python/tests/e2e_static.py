@@ -15,7 +15,7 @@ import socketserver
 import sys
 import threading
 
-from assetsync import AssetSyncClient
+from qentimart import QentimArtClient
 
 MiB = 1 << 20
 failures = 0
@@ -34,8 +34,8 @@ def tree(root):
         rel_base = os.path.relpath(base, root).replace(os.sep, "/")
         if rel_base == ".":
             rel_base = ""
-            if ".assetsync" in dirs:
-                dirs.remove(".assetsync")
+            if ".qentimart" in dirs:
+                dirs.remove(".qentimart")
         for n in names:
             rel = rel_base + "/" + n if rel_base else n
             with open(os.path.join(base, n), "rb") as f:
@@ -67,11 +67,11 @@ def main():
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     base_url = "http://127.0.0.1:%d" % httpd.server_address[1]
 
-    with AssetSyncClient(base_url=base_url, concurrency=16) as c:
+    with QentimArtClient(base_url=base_url, concurrency=16) as c:
         r = c.sync(dest, version="1.0.0")
         print("  静态全新同步 1.0.0: %s in %.2fs = %s/s" % (mib(r["bytes"]["downloaded_wire"]), r["elapsed_ms"] / 1000, mib(r["bytes_per_second"])))
         check(tree(dest) == tree1, "静态模式全新同步逐字节一致 (1.0.0)")
-        rep = AssetSyncClient.storage_report(dest)
+        rep = QentimArtClient.storage_report(dest)
         check(rep["ratio"] <= 1.10, "静态模式 ratio %.3f%% <= 110%%" % (rep["ratio"] * 100))
 
         r = c.sync(dest)

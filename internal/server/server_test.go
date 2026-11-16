@@ -11,11 +11,11 @@ import (
 	"path/filepath"
 	"testing"
 
-	"assetsync/internal/manifest"
-	"assetsync/internal/publish"
-	"assetsync/internal/server"
-	"assetsync/internal/storage"
-	"assetsync/internal/wire"
+	"qentimart/internal/manifest"
+	"qentimart/internal/publish"
+	"qentimart/internal/server"
+	"qentimart/internal/storage"
+	"qentimart/internal/wire"
 )
 
 const pubTok = "publish-token-0123456789"
@@ -110,7 +110,7 @@ func TestPublishDedupFetchGC(t *testing.T) {
 	}
 	gz, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if resp.Header.Get("X-AssetSync-Version") != "1.1.0" {
+	if resp.Header.Get("X-QentimArt-Version") != "1.1.0" {
 		t.Fatal("latest should be 1.1.0")
 	}
 	m, err := manifest.Decode(gz, 1<<30)

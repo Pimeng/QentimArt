@@ -1,11 +1,11 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { AssetSyncError } from './http.js';
+import { QentimArtError } from './http.js';
 import { sha256hex } from './frames.js';
 import { parseManifest, STATE_DIR } from './manifest.js';
 import { pool, scanDir, hashFile, writeFileAtomic, renameRetry, pruneEmptyDirs } from './localfs.js';
 
-export class SyncConflictError extends AssetSyncError {
+export class SyncConflictError extends QentimArtError {
   constructor(conflicts) {
     super(`${conflicts.length} locally modified/untracked file(s) block the sync (localChanges='fail'): ${conflicts.slice(0, 10).join(', ')}${conflicts.length > 10 ? ', ...' : ''}`, { code: 'ECONFLICT' });
     this.name = 'SyncConflictError';
@@ -70,11 +70,11 @@ async function acquireLock(dir) {
           } catch {}
         }
       } catch {}
-      if (!stale) throw new AssetSyncError(`another sync is running on ${dir}`, { code: 'ELOCKED' });
+      if (!stale) throw new QentimArtError(`another sync is running on ${dir}`, { code: 'ELOCKED' });
       await fs.rm(lock, { force: true });
     }
   }
-  throw new AssetSyncError(`could not lock ${dir}`, { code: 'ELOCKED' });
+  throw new QentimArtError(`could not lock ${dir}`, { code: 'ELOCKED' });
 }
 
 // ---------------------------------------------------------------- 计划
@@ -209,7 +209,7 @@ function buildSources(ctx, target, plan) {
 // ---------------------------------------------------------------- 执行
 
 /**
- * 将 `dir` 更新到目标版本。选项参见 AssetSyncClient.sync。
+ * 将 `dir` 更新到目标版本。选项参见 QentimArtClient.sync。
  */
 export async function runSync(client, dir, opts) {
   const started = Date.now();
@@ -221,7 +221,7 @@ export async function runSync(client, dir, opts) {
     dryRun: false,
     ...opts,
   };
-  if (!['overwrite', 'keep', 'fail'].includes(opts.localChanges)) throw new AssetSyncError(`invalid localChanges '${opts.localChanges}'`);
+  if (!['overwrite', 'keep', 'fail'].includes(opts.localChanges)) throw new QentimArtError(`invalid localChanges '${opts.localChanges}'`);
   dir = path.resolve(dir);
   await fs.mkdir(dir, { recursive: true });
 
@@ -371,7 +371,7 @@ async function applyWrites(client, dir, opts, plan, sources, stats, newTracked, 
   let seq = 0;
 
   for (const wave of waves(plan.toWrite, client.waveBytes, client.waveFiles)) {
-    if (opts.signal?.aborted) throw opts.signal.reason ?? new AssetSyncError('sync aborted', { code: 'ABORT_ERR' });
+    if (opts.signal?.aborted) throw opts.signal.reason ?? new QentimArtError('sync aborted', { code: 'ABORT_ERR' });
     const tasks = wave.map((w) => ({ ...w, tmp: path.join(tmpDir, `${seq++}.part`), fh: null }));
     try {
       await applyWave(client, dir, opts, tasks, sources, stats, newTracked, writeBytes, progress, deleteSet);
@@ -455,7 +455,7 @@ async function applyWave(client, dir, opts, tasks, sources, stats, newTracked, w
       try {
         await renameRetry(task.tmp, target);
       } catch (err) {
-        throw new AssetSyncError(`cannot replace ${task.t.path} (is it open in another program?): ${err.message}`, { code: err.code, cause: err });
+        throw new QentimArtError(`cannot replace ${task.t.path} (is it open in another program?): ${err.message}`, { code: err.code, cause: err });
       }
       const st = await fs.stat(target);
       newTracked[task.t.path] = Math.floor(st.mtimeMs);
@@ -479,7 +479,7 @@ async function ensureParent(dir, rel, deleteSet, policy) {
     const p = segs.slice(0, i).join('/');
     const st = await fs.lstat(path.join(dir, p)).catch(() => null);
     if (st && !st.isDirectory()) {
-      if (!deleteSet.has(p) && policy !== 'overwrite') throw new AssetSyncError(`${p} is a file but ${rel} needs it to be a directory`);
+      if (!deleteSet.has(p) && policy !== 'overwrite') throw new QentimArtError(`${p} is a file but ${rel} needs it to be a directory`);
       await fs.rm(path.join(dir, p), { force: true });
       deleteSet.delete(p);
     }
@@ -519,7 +519,7 @@ export async function runStatus(dir, project) {
 export async function runVerify(dir, onProgress) {
   dir = path.resolve(dir);
   const { state, manifest } = await readState(dir);
-  if (!state || !manifest) throw new AssetSyncError(`${dir} has not been synced yet`);
+  if (!state || !manifest) throw new QentimArtError(`${dir} has not been synced yet`);
   const bad = [];
   let done = 0;
   const files = [...manifest.files.values()];

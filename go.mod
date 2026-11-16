@@ -1,3 +1,3 @@
-module assetsync
+module qentimart
 
 go 1.23

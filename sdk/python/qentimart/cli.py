@@ -1,4 +1,4 @@
-"""assetsync-py：Python SDK 的命令行封装。"""
+"""qentimart-py：Python SDK 的命令行封装。"""
 from __future__ import annotations
 
 import argparse
@@ -7,7 +7,7 @@ import os
 import sys
 import time
 
-from . import AssetSyncClient, AssetSyncError, SyncConflictError
+from . import QentimArtClient, QentimArtError, SyncConflictError
 
 
 def _fmt(n: float) -> str:
@@ -20,12 +20,12 @@ def _fmt(n: float) -> str:
 
 
 def main(argv=None) -> int:
-    p = argparse.ArgumentParser(prog="assetsync-py", description="AssetSync 下游客户端")
+    p = argparse.ArgumentParser(prog="qentimart-py", description="QentimArt 下游客户端")
     p.add_argument("command", choices=["sync", "plan", "status", "verify", "versions", "report"])
-    p.add_argument("--server", default=os.environ.get("ASSETSYNC_SERVER"))
-    p.add_argument("--project", default=os.environ.get("ASSETSYNC_PROJECT"))
-    p.add_argument("--token", default=os.environ.get("ASSETSYNC_TOKEN"))
-    p.add_argument("--base-url", default=os.environ.get("ASSETSYNC_BASE_URL"), help="静态模式：公开静态树根地址（只读，无需鉴权）")
+    p.add_argument("--server", default=os.environ.get("QENTIMART_SERVER"))
+    p.add_argument("--project", default=os.environ.get("QENTIMART_PROJECT"))
+    p.add_argument("--token", default=os.environ.get("QENTIMART_TOKEN"))
+    p.add_argument("--base-url", default=os.environ.get("QENTIMART_BASE_URL"), help="静态模式：公开静态树根地址（只读，无需鉴权）")
     p.add_argument("--dir")
     p.add_argument("--version", default="latest")
     p.add_argument("--local-changes", default="overwrite", choices=["overwrite", "keep", "fail"])
@@ -47,13 +47,13 @@ def main(argv=None) -> int:
 
     try:
         if a.command == "report":
-            r = AssetSyncClient.storage_report(need("dir"))
+            r = QentimArtClient.storage_report(need("dir"))
             out(r, "assets %s, overhead %s, ratio %.3f%%" % (_fmt(r["asset_bytes"]), _fmt(r["overhead_bytes"]), r["ratio"] * 100))
             return 0
         if a.base_url:
-            client = AssetSyncClient(base_url=a.base_url, project=a.project, concurrency=a.concurrency)
+            client = QentimArtClient(base_url=a.base_url, project=a.project, concurrency=a.concurrency)
         else:
-            client = AssetSyncClient(need("server"), need("project"), token=a.token, concurrency=a.concurrency)
+            client = QentimArtClient(need("server"), need("project"), token=a.token, concurrency=a.concurrency)
         with client as c:
             if a.command == "versions":
                 v = c.list_versions()
@@ -99,7 +99,7 @@ def main(argv=None) -> int:
         print("\n".join(e.conflicts), file=sys.stderr)
         print("error: %s" % e, file=sys.stderr)
         return 1
-    except AssetSyncError as e:
+    except QentimArtError as e:
         print("error: %s" % e, file=sys.stderr)
         return 1
 

@@ -1,7 +1,7 @@
 {
-  "name": "@assetsync/sdk",
+  "name": "@qentimart/sdk",
   "version": "0.1.0",
-  "description": "AssetSync downstream SDK: pull game asset versions with chunk-level delta updates and no local object cache.",
+  "description": "QentimArt downstream SDK: pull game asset versions with chunk-level delta updates and no local object cache.",
   "type": "module",
   "main": "./src/index.js",
   "types": "./index.d.ts",
@@ -12,7 +12,7 @@
     }
   },
   "bin": {
-    "assetsync-node": "./bin/cli.js"
+    "qentimart-node": "./bin/cli.js"
   },
   "files": ["src", "bin", "index.d.ts", "README.md"],
   "engines": {

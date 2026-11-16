@@ -1,4 +1,4 @@
-// Package server 实现了 AssetSync 的 HTTP API。
+// Package server 实现了 QentimArt 的 HTTP API。
 package server
 
 import (
@@ -17,10 +17,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"assetsync/internal/manifest"
-	"assetsync/internal/semver"
-	"assetsync/internal/storage"
-	"assetsync/internal/wire"
+	"qentimart/internal/manifest"
+	"qentimart/internal/semver"
+	"qentimart/internal/storage"
+	"qentimart/internal/wire"
 )
 
 const (
@@ -100,7 +100,7 @@ func (s *Server) auth(role int, h handlerFunc) http.Handler {
 			return
 		}
 		if !s.allowed(r, name, role) {
-			w.Header().Set("WWW-Authenticate", `Bearer realm="assetsync"`)
+			w.Header().Set("WWW-Authenticate", `Bearer realm="qentimart"`)
 			writeErr(w, &httpError{http.StatusUnauthorized, "missing or insufficient token"})
 			return
 		}
@@ -188,7 +188,7 @@ func (s *Server) handleManifest(w http.ResponseWriter, r *http.Request, p *proje
 		return err
 	}
 	w.Header().Set("Content-Type", "application/gzip")
-	w.Header().Set("X-AssetSync-Version", vi.Version)
+	w.Header().Set("X-QentimArt-Version", vi.Version)
 	w.Header().Set("Content-Length", strconv.Itoa(len(c.gz)))
 	if req != "latest" {
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
@@ -451,8 +451,8 @@ func (s *Server) handleFetch(w http.ResponseWriter, r *http.Request, p *project)
 		}
 	}()
 
-	w.Header().Set("Content-Type", "application/x-assetsync-frames")
-	w.Header().Set("X-AssetSync-Chunks", strconv.Itoa(len(hashes)))
+	w.Header().Set("Content-Type", "application/x-qentimart-frames")
+	w.Header().Set("X-QentimArt-Chunks", strconv.Itoa(len(hashes)))
 	bw := bufio.NewWriterSize(w, 256<<10)
 	var hdr [wire.FrameHeaderLen]byte
 	for i, h := range hashes {

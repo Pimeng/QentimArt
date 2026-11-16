@@ -1,20 +1,20 @@
 import path from 'node:path';
-import { HttpClient, AssetSyncError } from './http.js';
+import { HttpClient, QentimArtError } from './http.js';
 import { StaticTransport } from './static.js';
 import { parseManifest, diffManifests, STATE_DIR } from './manifest.js';
 import { parseFrames, decodeFrame } from './frames.js';
 import { runSync, runStatus, runVerify, SyncConflictError } from './sync.js';
 import { dirBytes, scanDir } from './localfs.js';
 
-export { AssetSyncError, SyncConflictError, STATE_DIR };
+export { QentimArtError, SyncConflictError, STATE_DIR };
 
 /** 从 index.json 中按请求的 version（可为 "latest"）解析出版本元数据。 */
 function versionFromIndex(idx, version, prerelease) {
   let v = version;
   if (version === 'latest') v = prerelease ? idx.latestPrerelease : idx.latest;
-  if (!v) throw new AssetSyncError('project has no versions');
+  if (!v) throw new QentimArtError('project has no versions');
   const hit = (idx.versions || []).find((x) => x.version === v);
-  if (!hit) throw new AssetSyncError(`version ${v} not found`, { status: 404 });
+  if (!hit) throw new QentimArtError(`version ${v} not found`, { status: 404 });
   return hit;
 }
 
@@ -40,14 +40,14 @@ async function apiFetchChunks(client, { hashes, sizeOf, onChunk, stats, signal }
       const body = Buffer.concat([...pending].map((h) => Buffer.from(h, 'hex')));
       const res = await client.http.raw('POST', '/chunks/fetch', { body, headers: { 'content-type': 'application/octet-stream' }, signal });
       for await (const f of parseFrames(res)) {
-        if (!pending.has(f.hash)) throw new AssetSyncError(`server sent unexpected chunk ${f.hash}`);
+        if (!pending.has(f.hash)) throw new QentimArtError(`server sent unexpected chunk ${f.hash}`);
         const raw = await decodeFrame(f);
         stats.downloadedWire += f.payload.length + 41;
         stats.downloadedRaw += raw.length;
         await onChunk(f.hash, raw);
         pending.delete(f.hash);
       }
-      if (pending.size) throw new AssetSyncError(`server stream ended with ${pending.size} chunk(s) missing`, { code: 'ETRUNCATED' });
+      if (pending.size) throw new QentimArtError(`server stream ended with ${pending.size} chunk(s) missing`, { code: 'ETRUNCATED' });
     }, signal);
   };
 
@@ -63,11 +63,11 @@ async function apiFetchChunks(client, { hashes, sizeOf, onChunk, stats, signal }
 }
 
 /**
- * 下游 AssetSync 客户端。两种模式：
- *   动态：new AssetSyncClient({ server, project, token })  —— 走服务端 HTTP API
- *   静态：new AssetSyncClient({ baseUrl })                 —— 从公开静态树只读拉取，无需鉴权
+ * 下游 QentimArt 客户端。两种模式：
+ *   动态：new QentimArtClient({ server, project, token })  —— 走服务端 HTTP API
+ *   静态：new QentimArtClient({ baseUrl })                 —— 从公开静态树只读拉取，无需鉴权
  */
-export class AssetSyncClient {
+export class QentimArtClient {
   constructor({
     baseUrl,
     server,
@@ -91,7 +91,7 @@ export class AssetSyncClient {
       this.project = project ?? null;
       this.static = new StaticTransport({ baseUrl, concurrency, timeoutMs, retries });
     } else {
-      if (!server || !project) throw new AssetSyncError('server and project are required (or pass baseUrl for static mode)');
+      if (!server || !project) throw new QentimArtError('server and project are required (or pass baseUrl for static mode)');
       this.mode = 'api';
       this.project = project;
       this.http = new HttpClient({ server, project, token, concurrency, timeoutMs, retries });
@@ -130,7 +130,7 @@ export class AssetSyncClient {
       return { version: vi.version, gz };
     }
     const { body, headers } = await this.http.buffer('GET', `/versions/${encodeURIComponent(version)}/manifest${prerelease ? '?prerelease=1' : ''}`);
-    return { version: headers['x-assetsync-version'], gz: body };
+    return { version: headers['x-qentimart-version'], gz: body };
   }
 
   /** 下载并解析 manifest。 */
@@ -169,7 +169,7 @@ export class AssetSyncClient {
     return runVerify(dir, onProgress);
   }
 
-  /** 素材字节 vs. AssetSync 开销（.assetsync 目录）。 */
+  /** 素材字节 vs. QentimArt 开销（.qentimart 目录）。 */
   static async storageReport(dir) {
     dir = path.resolve(dir);
     const { files } = await scanDir(dir);

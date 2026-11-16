@@ -1,11 +1,11 @@
-export declare const STATE_DIR: '.assetsync';
+export declare const STATE_DIR: '.qentimart';
 
-export declare class AssetSyncError extends Error {
+export declare class QentimArtError extends Error {
   status?: number;
   code?: string;
 }
 
-export declare class SyncConflictError extends AssetSyncError {
+export declare class SyncConflictError extends QentimArtError {
   conflicts: string[];
 }
 
@@ -99,7 +99,7 @@ export interface SyncOptions {
    */
   localChanges?: LocalChangesPolicy;
   /**
-   * 安全开关：对于从未同步过的目录（没有 .assetsync 状态），即使
+   * 安全开关：对于从未同步过的目录（没有 .qentimart 状态），即使
    * localChanges='overwrite'，不属于目标版本的文件也会被保留，
    * 除非此项为 true。
    */
@@ -163,7 +163,7 @@ export interface StatusResult {
 
 export type Mode = 'api' | 'static';
 
-export declare class AssetSyncClient {
+export declare class QentimArtClient {
   constructor(opts: ClientOptions);
   readonly mode: Mode;
   readonly project: string;

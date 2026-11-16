@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional
 from urllib.parse import quote
 
-from ._errors import AssetSyncError, SyncConflictError
+from ._errors import QentimArtError, SyncConflictError
 from ._http import HttpClient
 from ._localfs import dir_bytes, hash_file, run_pool, scan_dir
 from ._plan import PlanContext, build_plan, build_sources, estimate_download
@@ -21,13 +21,13 @@ from ._wire import STATE_DIR, Manifest, decode_chunk, diff_manifests, iter_frame
 ProgressFn = Callable[[Dict[str, Any]], None]
 
 
-class AssetSyncClient:
-    """AssetSync 下游客户端。两种模式：
+class QentimArtClient:
+    """QentimArt 下游客户端。两种模式：
 
-    动态：AssetSyncClient("http://assets:8080", "mygame", token="...")  —— 走服务端 HTTP API
-    静态：AssetSyncClient(base_url="https://game.pages.dev")            —— 从公开静态树只读拉取，无需鉴权
+    动态：QentimArtClient("http://assets:8080", "mygame", token="...")  —— 走服务端 HTTP API
+    静态：QentimArtClient(base_url="https://game.pages.dev")            —— 从公开静态树只读拉取，无需鉴权
 
-    >>> client = AssetSyncClient("http://assets:8080", "mygame", token="...")
+    >>> client = QentimArtClient("http://assets:8080", "mygame", token="...")
     >>> result = client.sync("./assets")
     """
 
@@ -48,7 +48,7 @@ class AssetSyncClient:
             self._static = StaticTransport(base_url, concurrency, timeout, retries)
         else:
             if not server or not project:
-                raise AssetSyncError("server and project are required (or pass base_url= for static mode)")
+                raise QentimArtError("server and project are required (or pass base_url= for static mode)")
             self.mode = "api"
             self.project = project
             self._http = HttpClient(server, project, token, timeout, retries)
@@ -59,7 +59,7 @@ class AssetSyncClient:
         if self._static is not None:
             self._static.close()
 
-    def __enter__(self) -> "AssetSyncClient":
+    def __enter__(self) -> "QentimArtClient":
         return self
 
     def __exit__(self, *exc: Any) -> None:
@@ -88,7 +88,7 @@ class AssetSyncClient:
             return vi["version"], self._static.get_buffer("versions/%s/manifest.json.gz" % vi["version"])
         body, headers = self._http.buffer(
             "GET", "/versions/%s/manifest%s" % (quote(version, safe=""), "?prerelease=1" if prerelease else ""))
-        return headers.get("X-AssetSync-Version"), body
+        return headers.get("X-QentimArt-Version"), body
 
     def fetch_manifest(self, version: str = "latest", prerelease: bool = False) -> Manifest:
         return parse_manifest(self.fetch_manifest_raw(version, prerelease)[1])
@@ -122,9 +122,9 @@ class AssetSyncClient:
             try:
                 for h, enc, raw_len, payload in iter_frames(resp):
                     if cancel is not None and cancel.is_set():
-                        raise AssetSyncError("sync cancelled", code="ECANCELED")
+                        raise QentimArtError("sync cancelled", code="ECANCELED")
                     if h not in pending:
-                        raise AssetSyncError("server sent unexpected chunk %s" % h)
+                        raise QentimArtError("server sent unexpected chunk %s" % h)
                     raw = decode_chunk(h, enc, raw_len, payload)
                     with stats.lock:
                         stats.downloaded_wire += len(payload) + 41
@@ -136,7 +136,7 @@ class AssetSyncClient:
                 if not ok:
                     http.drop_conn()
             if pending:
-                raise AssetSyncError("server stream ended with %d chunk(s) missing" % len(pending), code="ETRUNCATED")
+                raise QentimArtError("server stream ended with %d chunk(s) missing" % len(pending), code="ETRUNCATED")
 
         http.with_retry(attempt, cancel)
 
@@ -157,7 +157,7 @@ class AssetSyncClient:
         抛出 SyncConflictError。
         """
         if local_changes not in ("overwrite", "keep", "fail"):
-            raise AssetSyncError("invalid local_changes %r" % local_changes)
+            raise QentimArtError("invalid local_changes %r" % local_changes)
         started = time.time()
         root = os.path.abspath(dir)
         os.makedirs(root, exist_ok=True)
@@ -301,7 +301,7 @@ class AssetSyncClient:
         root = os.path.abspath(dir)
         state, manifest, _ = read_state(root)
         if state is None or manifest is None:
-            raise AssetSyncError("%s has not been synced yet" % root)
+            raise QentimArtError("%s has not been synced yet" % root)
         bad = []
         lock = threading.Lock()
         total = sum(f.size for f in manifest.files.values())
@@ -325,7 +325,7 @@ class AssetSyncClient:
 
     @staticmethod
     def storage_report(dir: str) -> Dict[str, Any]:
-        """资源字节数与 AssetSync 额外开销（.assetsync 目录）的对比。"""
+        """资源字节数与 QentimArt 额外开销（.qentimart 目录）的对比。"""
         root = os.path.abspath(dir)
         files, _ = scan_dir(root)
         asset = sum(f.size for f in files.values())

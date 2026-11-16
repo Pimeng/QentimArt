@@ -1,4 +1,4 @@
-# AssetSync HTTP 协议 (v1)
+# QentimArt HTTP 协议 (v1)
 
 所有接口前缀：`/api/v1/projects/{project}`，`project` 需匹配 `^[a-z0-9][a-z0-9._-]{0,63}$`。
 
@@ -12,7 +12,7 @@
 |---|---|---|---|
 | GET | `/versions` | read | 版本列表（按 SemVer 降序）+ `latest` / `latestPrerelease` |
 | GET | `/versions/{v}` | read | 版本元数据；`v` 可为 `latest`（`?prerelease=1` 允许预发布版） |
-| GET | `/versions/{v}/manifest` | read | gzip 清单；响应头 `X-AssetSync-Version` 为实际版本号 |
+| GET | `/versions/{v}/manifest` | read | gzip 清单；响应头 `X-QentimArt-Version` 为实际版本号 |
 | GET | `/versions/{v}/diff?from={u}` | read | 两个版本的文件差异与需新下载的字节数 |
 | PUT | `/versions/{v}` | publish | 提交新版本，body 为 gzip 清单。版本不可变，重复提交返回 409 |
 | DELETE | `/versions/{v}` | admin | 删除版本（之后执行 gc 回收空间） |
@@ -72,7 +72,7 @@ gzip 压缩的 JSON，文件按路径排序：
 
 - `hash`：整个文件的 SHA-256。
 - `chunks`：`[块哈希, 块长度]` 列表，块在文件中的偏移量按顺序累加得到。只有一个块（此时块哈希等于文件哈希）或文件为空时省略。
-- 路径使用 `/` 分隔，禁止 `..`、绝对路径、Windows 非法字符、仅大小写不同的重复路径，以及保留目录 `.assetsync`。
+- 路径使用 `/` 分隔，禁止 `..`、绝对路径、Windows 非法字符、仅大小写不同的重复路径，以及保留目录 `.qentimart`。
 
 ## 分块
 
@@ -81,10 +81,10 @@ gzip 压缩的 JSON，文件按路径排序：
 ## 下游本地状态
 
 ```
-<asset dir>/.assetsync/state.json        {"formatVersion":1,"project","version","syncedAt","files":{path: mtimeMs}}
-<asset dir>/.assetsync/manifest.json.gz  当前版本清单原文（用于本地块复用与离线 status）
-<asset dir>/.assetsync/tmp/              同步过程中的临时文件，完成后删除
-<asset dir>/.assetsync/lock              防止并发同步
+<asset dir>/.qentimart/state.json        {"formatVersion":1,"project","version","syncedAt","files":{path: mtimeMs}}
+<asset dir>/.qentimart/manifest.json.gz  当前版本清单原文（用于本地块复用与离线 status）
+<asset dir>/.qentimart/tmp/              同步过程中的临时文件，完成后删除
+<asset dir>/.qentimart/lock              防止并发同步
 ```
 
 `mtimeMs` 为整数毫秒（`floor(mtime)`）。Node 和 Python SDK 的状态格式相同，可以互相接管同一个目录。

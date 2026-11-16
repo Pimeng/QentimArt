@@ -1,4 +1,4 @@
-"""<dir>/.assetsync 中的本地状态（与 Node.js SDK 格式相同）。"""
+"""<dir>/.qentimart 中的本地状态（与 Node.js SDK 格式相同）。"""
 from __future__ import annotations
 
 import json
@@ -6,7 +6,7 @@ import os
 import time
 from typing import Any, Callable, Dict, Optional, Tuple
 
-from ._errors import AssetSyncError
+from ._errors import QentimArtError
 from ._localfs import pid_alive, write_atomic
 from ._wire import STATE_DIR, Manifest, parse_manifest
 
@@ -35,7 +35,7 @@ def read_state(root: str) -> Tuple[Optional[Dict[str, Any]], Optional[Manifest],
             manifest = parse_manifest(gz)
             if manifest.version != state.get("version"):
                 manifest = None
-        except (OSError, AssetSyncError):
+        except (OSError, QentimArtError):
             manifest = None
     return state, manifest, gz
 
@@ -72,10 +72,10 @@ def acquire_lock(root: str) -> Callable[[], None]:
             except (OSError, ValueError):
                 pass
             if not stale:
-                raise AssetSyncError("another sync is running on %s" % root, code="ELOCKED")
+                raise QentimArtError("another sync is running on %s" % root, code="ELOCKED")
             release()
             continue
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump({"pid": os.getpid(), "at": int(time.time() * 1000)}, f)
         return release
-    raise AssetSyncError("could not lock %s" % root, code="ELOCKED")
+    raise QentimArtError("could not lock %s" % root, code="ELOCKED")

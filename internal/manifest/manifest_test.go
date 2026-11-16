@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"assetsync/internal/wire"
+	"qentimart/internal/wire"
 )
 
 func TestRoundTripAndImpliedChunks(t *testing.T) {
@@ -35,7 +35,7 @@ func TestValidation(t *testing.T) {
 	h := wire.Sum(nil)
 	bad := [][]File{
 		{{Path: "../x", Hash: h}},
-		{{Path: ".assetsync/state.json", Hash: h}},
+		{{Path: ".qentimart/state.json", Hash: h}},
 		{{Path: "a\\b", Hash: h}},
 		{{Path: "con:", Hash: h}},
 		{{Path: "A.png", Hash: h}, {Path: "a.png", Hash: h}},

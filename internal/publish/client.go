@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-// Client 是用于 AssetSync API 的轻量 HTTP 客户端（供 CLI 使用）。
+// Client 是用于 QentimArt API 的轻量 HTTP 客户端（供 CLI 使用）。
 type Client struct {
 	Server  string
 	Project string

@@ -28,13 +28,13 @@ import (
 	"strings"
 	"time"
 
-	"assetsync/internal/wire"
+	"qentimart/internal/wire"
 )
 
 const FormatVersion = 1
 
 // StateDir 是为每个客户端保留的状态目录名。
-const StateDir = ".assetsync"
+const StateDir = ".qentimart"
 
 // ChunkRef 引用文件中的一个块。
 type ChunkRef struct {

@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { inflateRaw } from 'node:zlib';
 import { promisify } from 'node:util';
-import { AssetSyncError } from './http.js';
+import { QentimArtError } from './http.js';
 
 const inflateRawAsync = promisify(inflateRaw);
 
@@ -63,7 +63,7 @@ export async function* parseFrames(stream) {
       yield f;
     }
   }
-  if (hdr || len > 0) throw new AssetSyncError('truncated chunk stream', { code: 'ETRUNCATED' });
+  if (hdr || len > 0) throw new QentimArtError('truncated chunk stream', { code: 'ETRUNCATED' });
 }
 
 export function sha256hex(buf) {
@@ -75,7 +75,7 @@ export function sha256hex(buf) {
  * 静态模式下每个 chunk 就是这样一个对象（与服务端存储格式一致）。
  */
 export async function decodeBlob(buf, hashHex) {
-  if (buf.length < 5) throw new AssetSyncError(`chunk ${hashHex}: blob too short`, { code: 'ECORRUPT' });
+  if (buf.length < 5) throw new QentimArtError(`chunk ${hashHex}: blob too short`, { code: 'ECORRUPT' });
   return decodeFrame({ hash: hashHex, enc: buf[0], rawLen: buf.readUInt32BE(1), payload: buf.subarray(5) });
 }
 
@@ -84,10 +84,10 @@ export async function decodeFrame(f) {
   let raw;
   if (f.enc === ENC_RAW) raw = f.payload;
   else if (f.enc === ENC_DEFLATE) raw = await inflateRawAsync(f.payload);
-  else if (f.enc === ENC_MISSING) throw new AssetSyncError(`chunk ${f.hash} is missing on the server`, { code: 'EMISSING' });
-  else throw new AssetSyncError(`unknown chunk encoding ${f.enc}`);
+  else if (f.enc === ENC_MISSING) throw new QentimArtError(`chunk ${f.hash} is missing on the server`, { code: 'EMISSING' });
+  else throw new QentimArtError(`unknown chunk encoding ${f.enc}`);
   if (raw.length !== f.rawLen || sha256hex(raw) !== f.hash) {
-    throw new AssetSyncError(`chunk ${f.hash} failed verification`, { code: 'ECORRUPT' });
+    throw new QentimArtError(`chunk ${f.hash} failed verification`, { code: 'ECORRUPT' });
   }
   return raw;
 }

@@ -9,7 +9,7 @@ import time
 from typing import Any, Callable, Optional
 from urllib.parse import urlsplit
 
-from ._errors import AssetSyncError
+from ._errors import QentimArtError
 from ._localfs import run_pool
 from ._wire import decode_blob
 
@@ -18,7 +18,7 @@ class StaticTransport:
     def __init__(self, base_url: str, concurrency: int = 8, timeout: float = 60.0, retries: int = 3):
         u = urlsplit(base_url)
         if u.scheme not in ("http", "https") or not u.hostname:
-            raise AssetSyncError("invalid base_url %r" % base_url)
+            raise QentimArtError("invalid base_url %r" % base_url)
         self.https = u.scheme == "https"
         self.host = u.hostname
         self.port = u.port
@@ -75,17 +75,17 @@ class StaticTransport:
             self._drop_conn()
             raise
         if resp.status >= 300:
-            raise AssetSyncError("GET %s: HTTP %d" % (rel, resp.status), status=resp.status)
+            raise QentimArtError("GET %s: HTTP %d" % (rel, resp.status), status=resp.status)
         return data
 
     def get_buffer(self, rel: str, cancel: Optional[threading.Event] = None) -> bytes:
         last: Optional[BaseException] = None
         for attempt in range(self.retries + 1):
             if cancel is not None and cancel.is_set():
-                raise AssetSyncError("sync cancelled", code="ECANCELED")
+                raise QentimArtError("sync cancelled", code="ECANCELED")
             try:
                 return self._get(rel)
-            except AssetSyncError as e:
+            except QentimArtError as e:
                 if e.status is not None and e.status < 500 and e.status != 429:
                     raise
                 last = e
@@ -94,7 +94,7 @@ class StaticTransport:
             self._drop_conn()
             if attempt < self.retries:
                 time.sleep(0.3 * (2 ** attempt))
-        raise last if isinstance(last, BaseException) else AssetSyncError("GET %s failed" % rel)
+        raise last if isinstance(last, BaseException) else QentimArtError("GET %s failed" % rel)
 
     def index(self, cancel: Optional[threading.Event] = None) -> dict:
         now = time.time()
@@ -121,11 +121,11 @@ def version_from_index(idx: dict, version: str, prerelease: bool) -> dict:
     if version == "latest":
         v = idx.get("latestPrerelease") if prerelease else idx.get("latest")
     if not v:
-        raise AssetSyncError("project has no versions")
+        raise QentimArtError("project has no versions")
     for x in idx.get("versions", []):
         if x.get("version") == v:
             return x
-    raise AssetSyncError("version %s not found" % v, status=404)
+    raise QentimArtError("version %s not found" % v, status=404)
 
 
 # 兼容类型注解
