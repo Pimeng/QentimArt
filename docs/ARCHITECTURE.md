@@ -48,22 +48,32 @@ QentimArt 的做法是把这些能力按「公开分发」的需求拼起来，�
 
 ## 数据流
 
-```
-发布端 (Go CLI)                          服务器 (Go)                           下游插件 (Node / Python / Java SDK)
-─────────────                            ──────────                            ─────────────────────────
-扫描目录 + 并行 FastCDC/SHA-256
-POST /chunks/missing  ───────────────▶  查询内存块索引
-  ◀──── 缺少的块哈希
-POST /chunks (多路并行帧流) ──────────▶  校验哈希 → 存储 (本地磁盘 / S3)
-PUT /versions/1.2.3 (清单) ───────────▶  校验所有块都存在 → 写 manifest + meta
-                                                                              GET /versions/latest
-                                                                              GET /versions/1.2.3/manifest
-                                                                              对比本地状态（size+mtime，必要时哈希）
-                                                                              本地复用块（按偏移读取 + 校验）
-                                         POST /chunks/fetch  ◀──────────────  缺失块分批、多连接并行拉取
-                                         并行读存储，按顺序写帧流 ──────────▶  校验 → 按偏移写入临时文件
-                                                                              rename 原子替换 → 删除多余文件
-                                                                              写 state.json + manifest.json.gz
+```mermaid
+sequenceDiagram
+    participant P as 发布端 (Go CLI)
+    participant S as 服务器 (Go)
+    participant D as 下游插件 (Node / Python / Java SDK)
+
+    Note over P,S: 发布 publish
+    Note over P: 扫描目录 + 并行 FastCDC/SHA-256
+    P->>S: POST /chunks/missing
+    Note right of S: 查询内存块索引
+    S-->>P: 缺少的块哈希
+    P->>S: POST /chunks（多路并行帧流）
+    Note right of S: 校验哈希 → 存储（本地磁盘 / S3）
+    P->>S: PUT /versions/1.2.3（清单）
+    Note right of S: 校验所有块都存在 → 写 manifest + meta
+
+    Note over S,D: 同步 sync
+    D->>S: GET /versions/latest
+    D->>S: GET /versions/1.2.3/manifest
+    Note over D: 对比本地状态（size+mtime，必要时哈希）
+    Note over D: 本地复用块（按偏移读取 + 校验）
+    D->>S: POST /chunks/fetch（缺失块分批、多连接并行拉取）
+    S-->>D: 并行读存储，按顺序写帧流
+    Note over D: 校验 → 按偏移写入临时文件
+    Note over D: rename 原子替换 → 删除多余文件
+    Note over D: 写 state.json + manifest.json.gz
 ```
 
 ## 吞吐设计

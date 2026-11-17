@@ -44,11 +44,14 @@ QentimArt 面向这个场景做了不同的取舍：
 
 ## 工作原理
 
-```
-┌──────────────────┐  publish   ┌──────────────────────┐   sync    ┌─────────────────────┐
-│ CI / 发布机       │ ─────────▶ │ qentimart-server     │ ────────▶ │ 编辑器插件 / 工具    │
-│ qentimart (客户端)│  只传新块   │ 本地磁盘 或 S3        │  只拉差异  │ Node / Python / Java │
-└──────────────────┘            └──────────────────────┘           └─────────────────────┘
+```mermaid
+graph LR
+    A["<b>CI / 发布机</b><br/>qentimart 客户端"]
+    B["<b>qentimart-server</b><br/>本地磁盘 或 S3"]
+    C["<b>编辑器插件 / 工具</b><br/>Node / Python / Java"]
+
+    A -->|"publish<br/>只传新块"| B
+    B -->|"sync<br/>只拉差异"| C
 ```
 
 1. 发布端扫描素材目录，并行分块并计算哈希，只上传服务器还没有的块，最后提交该版本的清单。
@@ -60,11 +63,14 @@ QentimArt 面向这个场景做了不同的取舍：
 ## 快速上手
 
 ```bash
-go build -o bin/ ./cmd/qentimart-server ./cmd/qentimart && bin/qentimart-server serve -config examples/server.json
+go build -o bin/ ./cmd/qentimart-server ./cmd/qentimart \
+  && bin/qentimart-server serve -config examples/server.json
 ```
 
 ```bash
-bin/qentimart publish -server http://127.0.0.1:8080 -project mygame -token <publish token> -version 1.0.0 ./Assets
+bin/qentimart publish -server http://127.0.0.1:8080 \
+  -project mygame -token <publish token> \
+  -version 1.0.0 ./Assets
 ```
 
 ```js

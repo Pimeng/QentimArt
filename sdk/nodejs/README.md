@@ -32,6 +32,8 @@ client.close();
 
 完整示例（检查更新 → 预估下载量 → 同步 → 处理冲突）见 [examples/plugin-example.mjs](examples/plugin-example.mjs)。
 
+聊天机器人插件（Yunzai-Bot V3 `apps/` 插件，参考 phi-plugin 用增量更新替代 `git pull` 拉"曲绘库"）见 [examples/plugin-illustration-update.js](examples/plugin-illustration-update.js)。
+
 ## 静态模式（无需服务端）
 
 如果素材发布成了静态树并托管在对象存储 / CDN / Cloudflare Pages 上（见根目录 README 的静态模式），只需传 `baseUrl`，不需要 server/token，全程只读：
