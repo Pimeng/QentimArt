@@ -13,7 +13,7 @@
 ![Java](https://img.shields.io/badge/Java-%E2%89%A521-ED8B00?logo=openjdk&logoColor=white)
 ![Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)
 
-[快速开始](docs/QUICKSTART.md) · [架构说明](docs/ARCHITECTURE.md) · [协议说明](docs/PROTOCOL.md) · [Node.js SDK](sdk/nodejs/README.md) · [Python SDK](sdk/python/README.md) · [Java SDK](sdk/java/README.md)
+[快速开始](docs/QUICKSTART.md) · [架构说明](docs/ARCHITECTURE.md) · [协议说明](docs/PROTOCOL.md) · [CDN 缓存](docs/CDN_CACHE.md) · [Node.js SDK](sdk/nodejs/README.md) · [Python SDK](sdk/python/README.md) · [Java SDK](sdk/java/README.md)
 
 </div>
 

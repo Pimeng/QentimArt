@@ -260,7 +260,7 @@ site/
 npx wrangler pages deploy ./site
 ```
 
-Cloudflare Pages 虽然按整站快照发布，但 `wrangler` 上传时会按文件哈希去重，未变动的数据块不会重复上传。目录里的 `_headers` 会被 Pages 自动识别，让不可变的数据块和历史清单长期缓存，`index.json` 保持短 TTL。
+Cloudflare Pages 虽然按整站快照发布，但 `wrangler` 上传时会按文件哈希去重，未变动的数据块不会重复上传。目录里的 `_headers` 会被 Pages 自动识别，让不可变的数据块和历史清单长期缓存，`index.json` 保持短 TTL。前置其他 CDN（腾讯云 EdgeOne、阿里云 ESA 等）或给动态服务端挂 CDN 时的缓存配法，见 [CDN 缓存配置指南](CDN_CACHE.md)。
 
 > **注意文件数限制**：Cloudflare Pages 免费版单站点最多允许 20,000 个文件（付费版为 100,000）。静态模式下每个数据块对应一个文件，按默认 1 MiB 平均块大小计算，大项目累积多个版本后可能撞到上限。调大平均块尺寸可以把文件数量降到原来的约四分之一，同时仍远低于 Pages 的 25 MiB 单文件限制：
 >
