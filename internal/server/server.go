@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -62,12 +63,19 @@ func New(cfg Config, store storage.Backend, logger *log.Logger) (*Server, error)
 	}
 	s := &Server{cfg: cfg, store: store, tokens: map[string]TokenConfig{}, log: logger, projects: map[string]*project{}, mcache: newManifestCache(8)}
 	for _, t := range cfg.Tokens {
-		s.tokens[t.Token] = t
+		s.tokens[tokenKey(t.Token)] = t
 	}
 	if len(cfg.Tokens) == 0 {
-		logger.Printf("WARNING: no tokens configured - every request is allowed with admin rights")
+		logger.Printf("WARNING: insecureNoAuth is set - every request is allowed with admin rights")
 	}
 	return s, nil
+}
+
+// tokenKey 以令牌的 SHA-256 作为查表键。查表键不随明文令牌内容变化而逐字节比较，
+// 因此令牌校验不会泄露可用于时序攻击的旁路信息。
+func tokenKey(tok string) string {
+	h := sha256.Sum256([]byte(tok))
+	return string(h[:])
 }
 
 // Handler 返回根 HTTP 处理器。
@@ -96,16 +104,16 @@ func (s *Server) auth(role int, h handlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		name := r.PathValue("project")
 		if !projectRe.MatchString(name) {
-			writeErr(w, errBad("invalid project name"))
+			s.writeErr(w, errBad("invalid project name"))
 			return
 		}
 		if !s.allowed(r, name, role) {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="qentimart"`)
-			writeErr(w, &httpError{http.StatusUnauthorized, "missing or insufficient token"})
+			s.writeErr(w, &httpError{http.StatusUnauthorized, "missing or insufficient token"})
 			return
 		}
 		if err := h(w, r, s.getProject(name)); err != nil {
-			writeErr(w, err)
+			s.writeErr(w, err)
 		}
 	})
 }
@@ -119,7 +127,7 @@ func (s *Server) allowed(r *http.Request, projectName string, role int) bool {
 	if len(auth) <= len(prefix) || auth[:len(prefix)] != prefix {
 		return role == RoleRead && s.cfg.AllowAnonymousRead
 	}
-	t, ok := s.tokens[auth[len(prefix):]]
+	t, ok := s.tokens[tokenKey(auth[len(prefix):])]
 	if !ok || roleLevel(t.Role) < role {
 		return false
 	}
@@ -131,15 +139,20 @@ func (s *Server) allowed(r *http.Request, projectName string, role int) bool {
 	return false
 }
 
-func writeErr(w http.ResponseWriter, err error) {
+func (s *Server) writeErr(w http.ResponseWriter, err error) {
 	code := http.StatusInternalServerError
+	msg := err.Error()
 	var he *httpError
 	if errors.As(err, &he) {
 		code = he.code
+	} else {
+		// 非预期错误：详情只写日志，对外返回通用文案，避免泄露存储路径 / 后端错误等内部信息。
+		s.log.Printf("internal error: %v", err)
+		msg = "internal server error"
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+	json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
 func writeJSON(w http.ResponseWriter, v any) error {

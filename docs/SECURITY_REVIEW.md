@@ -14,10 +14,10 @@
 |---|------|------|------|
 | 1 | 中（静态模式下偏高）✅ 已修复 | Java SDK 解压无输出上限（deflate 炸弹） | `sdk/java/.../Wire.java` |
 | 2 | 中 ✅ 已修复 | Java SDK 对 manifest / 块响应体整体缓冲，无大小上限 | `Wire.java`, `HttpTransport.java`, `StaticTransport.java` |
-| 3 | 低~中 | Bearer 令牌比较非恒定时间（时序侧信道） | `internal/server/server.go:122` |
-| 4 | 低 | 未配置令牌时默认对所有人开放 admin | `internal/server/server.go:67` |
+| 3 | 低~中 ✅ 已修复 | Bearer 令牌比较非恒定时间（时序侧信道） | `internal/server/server.go` |
+| 4 | 低 ✅ 已修复 | 未配置令牌时默认对所有人开放 admin | `internal/server/server.go`, `config.go` |
 | 5 | 低 | S3 允许明文 HTTP + `UNSIGNED-PAYLOAD` | `internal/storage/s3.go:101` |
-| 6 | 低 | 500 错误把内部错误原文回传客户端 | `internal/server/server.go:142` |
+| 6 | 低 ✅ 已修复 | 500 错误把内部错误原文回传客户端 | `internal/server/server.go` |
 | 7 | 低 | CLI 用 `-token` 传令牌会泄漏到进程列表 | `cmd/qentimart/main.go:91` |
 | 8 | 低 | Java `validatePath` 弱于 Go 版（控制字符 / Windows 保留名） | `Wire.java:169` |
 | 9 | 信息 | 已鉴权请求可无限增长 `projects` map | `internal/server/project.go:48` |
@@ -65,6 +65,8 @@ if (raw.length != rawLen || !sha256Hex(raw).equals(hashHex)) ...
 
 **建议**：对下载的 wire blob 和 manifest（压缩态与解压态）都设置合理上限，超限即报错。与 #1 属同一类“客户端无条件信任远端数据体积”的问题。
 
+> **状态：已修复（2026-11-17）。** 令牌改为以 SHA-256 作为查表键（`tokenKey`），`New` 填表与 `allowed` 查表均先哈希，查表不再逐字节比较明文令牌，消除时序旁路。
+
 ### 3.（低~中）Bearer 令牌比较非恒定时间
 
 `internal/server/server.go:113` `allowed`：
@@ -78,6 +80,8 @@ t, ok := s.tokens[auth[len(prefix):]]   // map 查找，非恒定时间
 
 **建议**：对令牌做哈希（如 SHA-256）后再入表并比较，或用 `crypto/subtle.ConstantTimeCompare` 与候选集比对。
 
+> **状态：已修复（2026-11-17）。** 新增 `insecureNoAuth` 配置项；无令牌且未显式设为 `true` 时 `normalize` 直接拒绝启动（不再静默 fail-open）。
+
 ### 4.（低）未配置令牌时默认对所有人放行 admin
 
 `internal/server/server.go:67`：无令牌配置时打印 warning 并对**每个请求**授予 admin。虽有日志告警，但“fail-open”默认对于一个可写、可删除、可 GC 的资产仓库是危险默认值。
@@ -89,6 +93,8 @@ t, ok := s.tokens[auth[len(prefix):]]   // map 查找，非恒定时间
 `internal/storage/s3.go:101` 对所有请求使用 `UNSIGNED-PAYLOAD`，且 `endpoint` 允许 `http://`。此时对象数据明文传输、且请求体不被签名保护，存在中间人窜改 / 窃听风险（凭据本身仍受 SigV4 头签名保护）。
 
 **建议**：生产环境强制 `https://`；或在使用 `http://` 时打印显式告警；视后端能力考虑对 PUT 签名真实 payload 哈希。
+
+> **状态：已修复（2026-11-17）。** `writeErr` 改为 `*Server` 方法；非 `httpError`（即 500）只把详情写日志，对外返回通用 `internal server error`。
 
 ### 6.（低）500 错误回传内部错误原文
 
@@ -131,6 +137,6 @@ t, ok := s.tokens[auth[len(prefix):]]   // map 查找，非恒定时间
 
 ## 优先处理建议
 
-1. 先修 #1、#2（Java SDK 下载 / 解压上限）——这是当前唯一“远端可直接触发客户端资源耗尽”的实际漏洞，且静态模式属官方支持形态。
-2. 再做 #3、#4、#6 的服务端加固。
-3. 其余为文档 / 健壮性改进。
+1. ~~先修 #1、#2（Java SDK 下载 / 解压上限）~~ ✅ 已完成。
+2. ~~再做 #3、#4、#6 的服务端加固~~ ✅ 已完成。
+3. 剩余 #5（S3 明文 HTTP）、#7（CLI `-token`）、#8（Java 路径校验对齐）、#9（项目 map 上限）为文档 / 健壮性改进，可按需跟进。

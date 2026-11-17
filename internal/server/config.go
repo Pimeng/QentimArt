@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -30,6 +31,9 @@ type Config struct {
 	Storage            storage.Config `json:"storage"`
 	Tokens             []TokenConfig  `json:"tokens"`
 	AllowAnonymousRead bool           `json:"allowAnonymousRead"`
+	// InsecureNoAuth 必须显式设为 true 才允许在完全不配置令牌的情况下启动
+	// （此时每个请求都拥有 admin 权限）。否则无令牌时服务端拒绝启动。
+	InsecureNoAuth bool `json:"insecureNoAuth,omitempty"`
 	// MaxFetchChunks 限制每个批量拉取请求中的哈希数量。
 	MaxFetchChunks int `json:"maxFetchChunks,omitempty"`
 	// GCGrace 保护刚上传（尚未提交）的块不被 GC 回收。
@@ -86,6 +90,9 @@ func (c *Config) normalize() error {
 		if c.cacheTTL, err = time.ParseDuration(c.VersionCacheTTL); err != nil {
 			return fmt.Errorf("versionCacheTTL: %w", err)
 		}
+	}
+	if len(c.Tokens) == 0 && !c.InsecureNoAuth {
+		return errors.New(`no tokens configured; add at least one token, or set "insecureNoAuth": true to explicitly allow unauthenticated admin access`)
 	}
 	for _, t := range c.Tokens {
 		if len(t.Token) < 16 {
