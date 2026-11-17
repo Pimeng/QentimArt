@@ -30,9 +30,9 @@ console.log(result.version, result.storage.ratio); // 例如 '1.2.0' 1.0004
 client.close();
 ```
 
-完整示例（检查更新 → 预估下载量 → 同步 → 处理冲突）见 [examples/plugin-example.mjs](examples/plugin-example.mjs)。
+完整示例（检查更新 → 预估下载量 → 同步 → 处理冲突）见 [examples/plugin-example.mjs](examples/plugin-example.mjs)
 
-聊天机器人插件（Yunzai-Bot V3 `apps/` 插件，参考 phi-plugin 用增量更新替代 `git pull` 拉"曲绘库"）见 [examples/plugin-illustration-update.js](examples/plugin-illustration-update.js)。
+聊天机器人插件（Yunzai-Bot V3 `apps/` 插件，参考 phi-plugin 用增量更新替代 `git pull` 拉"曲绘库"）见 [examples/plugin-illustration-update.js](examples/plugin-illustration-update.js)
 
 ## 静态模式（无需服务端）
 
@@ -44,7 +44,7 @@ await client.sync('./assets');                     // 和动态模式用法完�
 await client.sync('./assets', { version: '1.0.0' });
 ```
 
-`sync` / `plan` / `status` / `verify` / `diff` / `storageReport` 用法与动态模式相同。
+`sync` / `plan` / `status` / `verify` / `diff` / `storageReport` 用法与动态模式相同
 
 ## API
 
@@ -86,6 +86,6 @@ npx qentimart-node report  --dir ./assets
 
 ## 性能调优
 
-- `concurrency`：并行请求数，千兆内网 8 就够了，高延迟网络或 S3 后端可以调到 16–32。
-- 需要大量解压时，可以调大 libuv 线程池：`UV_THREADPOOL_SIZE=16`。
-- `waveBytes` / `waveFiles`：每轮最多同时打开的临时文件总大小和数量。
+- `concurrency`：并行请求数，千兆内网 8 就够了，高延迟网络或 S3 后端可以调到 16–32
+- 需要大量解压时，可以调大 libuv 线程池：`UV_THREADPOOL_SIZE=16`
+- `waveBytes` / `waveFiles`：每轮最多同时打开的临时文件总大小和数量

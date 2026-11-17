@@ -13,9 +13,9 @@ QentimArt 下游 SDK 的 Java 版本，只用 JDK 标准库，支持 **Java ≥ 
 cd sdk/java && ./gradlew build
 ```
 
-产物：`build/libs/qentimart-sdk-0.1.0.jar`（可执行，内含 CLI 入口）与 `qentimart-sdk-0.1.0-sources.jar`。
+产物：`build/libs/qentimart-sdk-0.1.0.jar`（可执行，内含 CLI 入口）与 `qentimart-sdk-0.1.0-sources.jar`
 
-坐标：`io.qentimart:qentimart-sdk:0.1.0`。
+坐标：`io.qentimart:qentimart-sdk:0.1.0`
 
 ## 快速开始
 
@@ -46,7 +46,7 @@ try (QentimArtClient client = QentimArtClient.staticClient("https://mygame.pages
 }
 ```
 
-`sync` / `plan` / `status` / `verify` / `diff` / `storageReport` 用法与动态模式一致。
+`sync` / `plan` / `status` / `verify` / `diff` / `storageReport` 用法与动态模式一致
 
 ## API
 
@@ -74,7 +74,7 @@ try (QentimArtClient client = QentimArtClient.staticClient("https://mygame.pages
 | `onProgress` | `null` | 回调 `Consumer<ProgressEvent>`，字段 `phase / done / total / downloadedBytes / bytesPerSecond` |
 | `cancel` | `null` | `AtomicBoolean`，调用 `set(true)` 即可取消同步 |
 
-`SyncResult` 字段采用 Java 惯例 camelCase（`downloadedWire`、`upToDate`、`previousVersion` 等）；这是 SDK 本地结构，不影响与其他语言 SDK 共享同一目录——真正跨 SDK 兼容的是磁盘上的 `.qentimart/` 状态格式与 HTTP/静态协议。
+`SyncResult` 字段采用 Java 惯例 camelCase（`downloadedWire`、`upToDate`、`previousVersion` 等）；这是 SDK 本地结构，不影响与其他语言 SDK 共享同一目录——真正跨 SDK 兼容的是磁盘上的 `.qentimart/` 状态格式与 HTTP/静态协议
 
 ## 命令行
 

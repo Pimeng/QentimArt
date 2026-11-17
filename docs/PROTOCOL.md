@@ -1,10 +1,10 @@
 # QentimArt HTTP 协议 (v1)
 
-所有接口前缀：`/api/v1/projects/{project}`，`project` 需匹配 `^[a-z0-9][a-z0-9._-]{0,63}$`。
+所有接口前缀：`/api/v1/projects/{project}`，`project` 需匹配 `^[a-z0-9][a-z0-9._-]{0,63}$`
 
 鉴权：`Authorization: Bearer <token>`。角色 `read` < `publish` < `admin`，高角色包含低角色权限；token 可限定项目（`"*"` 表示全部）。
 
-错误响应统一为 `{"error": "..."}`，状态码 400 / 401 / 404 / 409 / 500。
+错误响应统一为 `{"error": "..."}`，状态码 400 / 401 / 404 / 409 / 500
 
 ## 版本
 
@@ -18,7 +18,7 @@
 | DELETE | `/versions/{v}` | admin | 删除版本（之后执行 gc 回收空间） |
 | POST | `/gc?dryRun=1` | admin | 删除未被任何版本引用的块（有宽限期，保护上传中未提交的块） |
 
-`latest` 的规则：取最高的正式版；没有正式版时取最高的预发布版；`prerelease=1` 时直接取最高版本。
+`latest` 的规则：取最高的正式版；没有正式版时取最高的预发布版；`prerelease=1` 时直接取最高版本
 
 VersionInfo：
 
@@ -30,7 +30,7 @@ VersionInfo：
 }
 ```
 
-`deltaBytes`：本版本相对 `baseVersion`（发布时最接近的更低版本）新增的块的原始字节数，也就是服务器为这个版本额外存储的数据量（压缩前）。
+`deltaBytes`：本版本相对 `baseVersion`（发布时最接近的更低版本）新增的块的原始字节数，也就是服务器为这个版本额外存储的数据量（压缩前）
 
 ## 块
 
@@ -70,9 +70,9 @@ gzip 压缩的 JSON，文件按路径排序：
 }
 ```
 
-- `hash`：整个文件的 SHA-256。
+- `hash`：整个文件的 SHA-256
 - `chunks`：`[块哈希, 块长度]` 列表，块在文件中的偏移量按顺序累加得到。只有一个块（此时块哈希等于文件哈希）或文件为空时省略。
-- 路径使用 `/` 分隔，禁止 `..`、绝对路径、Windows 非法字符、仅大小写不同的重复路径，以及保留目录 `.qentimart`。
+- 路径使用 `/` 分隔，禁止 `..`、绝对路径、Windows 非法字符、仅大小写不同的重复路径，以及保留目录 `.qentimart`
 
 ## 分块
 
@@ -96,7 +96,7 @@ gzip 压缩的 JSON，文件按路径排序：
 
 ### 消费端路径安全
 
-下游 SDK 不信任清单与服务端：解析清单时拒绝 `..`、绝对路径、Windows 盘符/非法字符、保留目录 `.qentimart`、反斜杠与 `\0`；写入时**逐段创建父目录且不跟随符号链接**——若目标路径的某个本地父目录是指向资源目录之外的符号链接，同步会以 `unsafe path ... is a symlink` 拒绝，避免 `rename` 把文件写到资源目录外（逃逸）。
+下游 SDK 不信任清单与服务端：解析清单时拒绝 `..`、绝对路径、Windows 盘符/非法字符、保留目录 `.qentimart`、反斜杠与 `\0`；写入时**逐段创建父目录且不跟随符号链接**——若目标路径的某个本地父目录是指向资源目录之外的符号链接，同步会以 `unsafe path ... is a symlink` 拒绝，避免 `rename` 把文件写到资源目录外（逃逸）
 
 ## 静态分发树（方案 B）
 
@@ -127,7 +127,7 @@ gzip 压缩的 JSON，文件按路径排序：
 ```
 
 - `latest` / `latestPrerelease` 由发布端在发布时预先算好（静态托管无法在读取时列目录排序）。客户端请求 `latest` 时，稳定版取 `latest`，带 `prerelease` 时取 `latestPrerelease`。
-- `versions` 按 SemVer 降序，每项即 `meta.json` 的内容。
+- `versions` 按 SemVer 降序，每项即 `meta.json` 的内容
 
 ### chunk 作为静态对象
 
@@ -143,8 +143,8 @@ payload          原始或 DEFLATE 数据
 
 ### 客户端读取流程
 
-1. `GET {base}/index.json` → 解析目标版本（`latest` 或指定版本）。
-2. `GET {base}/versions/<v>/manifest.json.gz` → 得到文件与块列表。
-3. 对比本地状态，复用本地已有的块，其余并发 `GET {base}/chunks/..`。
+1. `GET {base}/index.json` → 解析目标版本（`latest` 或指定版本）
+2. `GET {base}/versions/<v>/manifest.json.gz` → 得到文件与块列表
+3. 对比本地状态，复用本地已有的块，其余并发 `GET {base}/chunks/..`
 
-缓存：`index.json` 唯一可变，用短 TTL；`manifest` 和 `chunks` 不可变，可永久缓存。
+缓存：`index.json` 唯一可变，用短 TTL；`manifest` 和 `chunks` 不可变，可永久缓存

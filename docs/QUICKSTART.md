@@ -1,6 +1,6 @@
 # 快速开始
 
-本文从零搭建一套 QentimArt：启动服务端 → 在 CI 中发布素材版本 → 在下游插件或工具中同步。
+本文从零搭建一套 QentimArt：启动服务端 → 在 CI 中发布素材版本 → 在下游插件或工具中同步
 
 - [环境要求](#环境要求)
 - [1. 编译并启动服务端](#1-编译并启动服务端)
@@ -70,7 +70,7 @@ bin/qentimart-server serve -config server.local.json
 | `gcGrace` | GC 宽限期，默认 `1h`，保护正在发布、尚未提交的块 |
 | `versionCacheTTL` | 版本列表缓存时间，默认 `15s`（多实例共享同一个 bucket 时生效） |
 
-不配置任何 token 时，所有请求都拥有 admin 权限，只适合本地试用。
+不配置任何 token 时，所有请求都拥有 admin 权限，只适合本地试用
 
 ### 使用 S3 / MinIO
 
@@ -86,7 +86,7 @@ docker build -t qentimart .
 docker run -d -p 8080:8080 -v /srv/qentimart/data:/data -v /srv/qentimart/server.json:/etc/qentimart/server.json:ro qentimart
 ```
 
-使用本地存储时，把配置里的 `storage.path` 设为 `/data`。
+使用本地存储时，把配置里的 `storage.path` 设为 `/data`
 
 ## 2. 发布版本
 
@@ -102,16 +102,16 @@ export QENTIMART_SERVER=http://127.0.0.1:8080 QENTIMART_PROJECT=mygame QENTIMART
 bin/qentimart publish -version 1.2.0 -exclude "*.tmp,Library/" ./Assets
 ```
 
-发布端会并行分块并计算哈希，只上传服务器还没有的块，最后提交清单。
+发布端会并行分块并计算哈希，只上传服务器还没有的块，最后提交清单
 
-- 版本号必须是 SemVer（如 `1.2.0`、`2.0.0-beta.1`），且**不可变**：同一个版本号不能重复发布。
-- 只想看看会上传多少数据、不真正提交时，可以加 `-dry-run`。
-- `-concurrency` 控制并行上传连接数（默认 8），`-compress none` 可以关闭压缩。
-- 默认不会扫描 `.git` 和 `.qentimart` 目录。
+- 版本号必须是 SemVer（如 `1.2.0`、`2.0.0-beta.1`），且**不可变**：同一个版本号不能重复发布
+- 只想看看会上传多少数据、不真正提交时，可以加 `-dry-run`
+- `-concurrency` 控制并行上传连接数（默认 8），`-compress none` 可以关闭压缩
+- 默认不会扫描 `.git` 和 `.qentimart` 目录
 
 ## 3. 下游接入
 
-下游只需要一个 `read` 角色的 token。
+下游只需要一个 `read` 角色的 token
 
 ### Node.js
 
@@ -128,7 +128,7 @@ await client.sync('./assets', { version: '1.1.0' });        // 切换（升级�
 client.close();
 ```
 
-完整 API 与插件接入示例见 [sdk/nodejs/README.md](../sdk/nodejs/README.md)。
+完整 API 与插件接入示例见 [sdk/nodejs/README.md](../sdk/nodejs/README.md)
 
 ### Python
 
@@ -144,7 +144,7 @@ with QentimArtClient("http://127.0.0.1:8080", "mygame", token=token) as client:
     client.sync("./assets", version="1.1.0")
 ```
 
-完整 API 见 [sdk/python/README.md](../sdk/python/README.md)。
+完整 API 见 [sdk/python/README.md](../sdk/python/README.md)
 
 ### Java
 
@@ -162,7 +162,7 @@ try (QentimArtClient client = new QentimArtClient("http://127.0.0.1:8080", "myga
 }
 ```
 
-完整 API 与构建说明见 [sdk/java/README.md](../sdk/java/README.md)。
+完整 API 与构建说明见 [sdk/java/README.md](../sdk/java/README.md)
 
 ### 命令行
 
@@ -196,10 +196,10 @@ java -jar sdk/java/build/libs/qentimart-sdk-0.1.0.jar sync --server http://127.0
 
 已同步文件默认用 **size + mtime** 快速判断是否变化，只有可疑文件才重算哈希——这是吞吐的关键。但它存在盲区：如果有人改了文件内容却**保持大小不变并还原了 mtime**，快速检测会漏判。按需要分层防护：
 
-- **普通文件**：保持默认快速检测即可。
-- **重要素材**：用 `verifyPaths`（Python `verify_paths`，CLI `--verify-paths a.pak,critical/`）指定——这些文件每次同步都按哈希校验，不匹配即重新下载自愈；其余文件仍走快速路径。
-- **强校验模式**：`verifyAll` 对所有文件强制哈希（代价最高）。
-- **定期巡检**：`verify` 命令重算当前版本每个文件的哈希，检测静默损坏。
+- **普通文件**：保持默认快速检测即可
+- **重要素材**：用 `verifyPaths`（Python `verify_paths`，CLI `--verify-paths a.pak,critical/`）指定——这些文件每次同步都按哈希校验，不匹配即重新下载自愈；其余文件仍走快速路径
+- **强校验模式**：`verifyAll` 对所有文件强制哈希（代价最高）
+- **定期巡检**：`verify` 命令重算当前版本每个文件的哈希，检测静默损坏
 
 ```bash
 java -jar sdk/java/build/libs/qentimart-sdk-0.1.0.jar sync --dir ./assets --server ... --project ... --verify-paths bundles/core.pak,shaders/
@@ -225,7 +225,7 @@ bin/qentimart gc                                  # 回收不再被任何版本�
 
 ## 5. 静态模式 / Cloudflare Pages
 
-静态模式**不需要运行任何服务端**：发布端把素材构建成一棵自包含的静态树（本地目录），用 `wrangler` / `rsync` / S3 sync 部署到任意静态托管；下游客户端只用一个公开的 `index.json` 地址即可差异化更新，全程只有 `GET`、默认不需要鉴权。
+静态模式**不需要运行任何服务端**：发布端把素材构建成一棵自包含的静态树（本地目录），用 `wrangler` / `rsync` / S3 sync 部署到任意静态托管；下游客户端只用一个公开的 `index.json` 地址即可差异化更新，全程只有 `GET`、默认不需要鉴权
 
 ```
 qentimart publish --static  ──▶  静态树目录  ──wrangler/rsync──▶  Cloudflare Pages / CDN  ──GET──▶  SDK (baseUrl)
@@ -319,9 +319,9 @@ qentimart delete-version --static -o ./site -version 1.0.0   # 删除某版本�
 qentimart gc --static -o ./site                              # 回收不再被引用的块（可加 -dry-run）
 ```
 
-静态 GC 默认保留宽限期内（`-gc-grace`，默认 1h）最近写入的块，避免与并发发布互删；确认没有发布在进行时可用 `-gc-grace 0` 立即回收。
+静态 GC 默认保留宽限期内（`-gc-grace`，默认 1h）最近写入的块，避免与并发发布互删；确认没有发布在进行时可用 `-gc-grace 0` 立即回收
 
-清理后重新 `wrangler pages deploy ./site` 即可。
+清理后重新 `wrangler pages deploy ./site` 即可
 
 ## 运行测试
 
@@ -337,10 +337,10 @@ go test ./...
 node tests/e2e.mjs
 ```
 
-- 默认生成约 400 MiB 素材，`E2E_SIZE_MB=4000` 可以做更大规模的压测。
-- `E2E_SKIP_PYTHON=1` 跳过 Python SDK 的检查。
-- `E2E_SKIP_JAVA=1` 跳过 Java SDK 的检查；未安装 JDK ≥ 21 时自动跳过（用 `JAVA_HOME` 指定 JDK，测试用 `javac` 直接编译，无需本机 Gradle）。
-- 测试数据写在 `tests/.work/`（已在 `.gitignore` 中忽略），跑完可以删除。
+- 默认生成约 400 MiB 素材，`E2E_SIZE_MB=4000` 可以做更大规模的压测
+- `E2E_SKIP_PYTHON=1` 跳过 Python SDK 的检查
+- `E2E_SKIP_JAVA=1` 跳过 Java SDK 的检查；未安装 JDK ≥ 21 时自动跳过（用 `JAVA_HOME` 指定 JDK，测试用 `javac` 直接编译，无需本机 Gradle）
+- 测试数据写在 `tests/.work/`（已在 `.gitignore` 中忽略），跑完可以删除
 
 只测网络 + 解码 + 校验、不写磁盘的吞吐（用来区分网络瓶颈和磁盘瓶颈）：
 

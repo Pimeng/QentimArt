@@ -23,7 +23,7 @@ with QentimArtClient("http://assets.internal:8080", "mygame", token="<read token
     client.sync("./assets", version="1.0.0")           # 切换（降级）到指定版本
 ```
 
-完整示例见 [examples/plugin_example.py](examples/plugin_example.py)。
+完整示例见 [examples/plugin_example.py](examples/plugin_example.py)
 
 ## 静态模式（无需服务端）
 
@@ -36,7 +36,7 @@ with QentimArtClient(base_url="https://mygame.pages.dev") as client:
     client.sync("./assets", version="1.0.0")
 ```
 
-`sync` / `plan` / `status` / `verify` / `diff` / `storage_report` 用法与动态模式一致。
+`sync` / `plan` / `status` / `verify` / `diff` / `storage_report` 用法与动态模式一致
 
 ## API
 
