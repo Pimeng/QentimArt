@@ -28,6 +28,10 @@ type S3Config struct {
 	PathStyle   bool   `json:"pathStyle"`             // MinIO 使用 true；虚拟主机（virtual-hosted）风格使用 false
 	Prefix      string `json:"prefix,omitempty"`      // 可选：bucket 内的 key 前缀
 	Parallelism int    `json:"parallelism,omitempty"` // 每批的并发读取数（默认 32）
+	// AllowInsecureHTTP 允许对非回环地址使用明文 http endpoint。
+	// 明文下对象数据与请求体均不加密、不受完整性保护（SigV4 只签名请求头），
+	// 因此必须显式开启；回环地址（localhost / 127.0.0.1，如本地 MinIO）无需开启。
+	AllowInsecureHTTP bool `json:"allowInsecureHTTP,omitempty"`
 }
 
 // S3 是一个最小化、无外部依赖的 S3 客户端。
@@ -53,6 +57,10 @@ func NewS3(c S3Config) (*S3, error) {
 	if err != nil {
 		return nil, err
 	}
+	if u.Scheme != "https" && !c.AllowInsecureHTTP && !isLoopback(u.Hostname()) {
+		return nil, fmt.Errorf("s3: endpoint %q is not https; data and request bodies would be sent in plaintext. "+
+			`set "allowInsecureHTTP": true to override, or use a loopback address for local testing`, c.Endpoint)
+	}
 	tr := &http.Transport{
 		Proxy:               http.ProxyFromEnvironment,
 		DialContext:         (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
@@ -62,6 +70,15 @@ func NewS3(c S3Config) (*S3, error) {
 		DisableCompression:  true,
 	}
 	return &S3{cfg: c, base: u, client: &http.Client{Transport: tr}}, nil
+}
+
+// isLoopback 判断主机名是否为回环地址（localhost 或回环 IP）。
+func isLoopback(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func (s *S3) Parallelism() int { return s.cfg.Parallelism }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"path"
 	"strings"
 	"sync"
@@ -45,15 +46,18 @@ func manifestKey(p, v string) string          { return versionPrefix(p) + v + "/
 func metaKey(p, v string) string              { return versionPrefix(p) + v + "/meta.json" }
 func (s *Server) chunkPrefix(p string) string { return "projects/" + p + "/chunks/" }
 
-func (s *Server) getProject(name string) *project {
+func (s *Server) getProject(name string) (*project, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	p := s.projects[name]
 	if p == nil {
+		if s.cfg.maxProjects > 0 && len(s.projects) >= s.cfg.maxProjects {
+			return nil, &httpError{http.StatusServiceUnavailable, "server project cache is full"}
+		}
 		p = &project{name: name}
 		s.projects[name] = p
 	}
-	return p
+	return p, nil
 }
 
 // ensureChunks 加载已存储块的哈希集合（只加载一次）。

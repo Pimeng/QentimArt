@@ -41,9 +41,13 @@ type Config struct {
 	// VersionCacheTTL 控制从存储重新读取版本列表的频率
 	// （当多个服务端实例共享同一个 bucket 时很重要）。
 	VersionCacheTTL string `json:"versionCacheTTL,omitempty"`
+	// MaxProjects 限制服务端内存中常驻的项目数量，防止持有通配（"*"）令牌者用
+	// 大量不同项目名撑大内存。0 表示使用默认值。
+	MaxProjects int `json:"maxProjects,omitempty"`
 
-	gcGrace  time.Duration
-	cacheTTL time.Duration
+	gcGrace     time.Duration
+	cacheTTL    time.Duration
+	maxProjects int
 }
 
 // LoadConfig 读取 JSON 配置文件。
@@ -90,6 +94,10 @@ func (c *Config) normalize() error {
 		if c.cacheTTL, err = time.ParseDuration(c.VersionCacheTTL); err != nil {
 			return fmt.Errorf("versionCacheTTL: %w", err)
 		}
+	}
+	c.maxProjects = 100000
+	if c.MaxProjects > 0 {
+		c.maxProjects = c.MaxProjects
 	}
 	if len(c.Tokens) == 0 && !c.InsecureNoAuth {
 		return errors.New(`no tokens configured; add at least one token, or set "insecureNoAuth": true to explicitly allow unauthenticated admin access`)

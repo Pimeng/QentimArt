@@ -16,11 +16,11 @@
 | 2 | 中 ✅ 已修复 | Java SDK 对 manifest / 块响应体整体缓冲，无大小上限 | `Wire.java`, `HttpTransport.java`, `StaticTransport.java` |
 | 3 | 低~中 ✅ 已修复 | Bearer 令牌比较非恒定时间（时序侧信道） | `internal/server/server.go` |
 | 4 | 低 ✅ 已修复 | 未配置令牌时默认对所有人开放 admin | `internal/server/server.go`, `config.go` |
-| 5 | 低 | S3 允许明文 HTTP + `UNSIGNED-PAYLOAD` | `internal/storage/s3.go:101` |
+| 5 | 低 ✅ 已修复 | S3 允许明文 HTTP + `UNSIGNED-PAYLOAD` | `internal/storage/s3.go` |
 | 6 | 低 ✅ 已修复 | 500 错误把内部错误原文回传客户端 | `internal/server/server.go` |
-| 7 | 低 | CLI 用 `-token` 传令牌会泄漏到进程列表 | `cmd/qentimart/main.go:91` |
-| 8 | 低 | Java `validatePath` 弱于 Go 版（控制字符 / Windows 保留名） | `Wire.java:169` |
-| 9 | 信息 | 已鉴权请求可无限增长 `projects` map | `internal/server/project.go:48` |
+| 7 | 低 ✅ 已修复 | CLI 用 `-token` 传令牌会泄漏到进程列表 | `cmd/qentimart/main.go` |
+| 8 | 低 ✅ 已修复 | Java `validatePath` 弱于 Go 版（控制字符 / Windows 保留名） | `Wire.java` |
+| 9 | 信息 ✅ 已修复 | 已鉴权请求可无限增长 `projects` map | `internal/server/project.go`, `config.go` |
 
 ---
 
@@ -88,6 +88,8 @@ t, ok := s.tokens[auth[len(prefix):]]   // map 查找，非恒定时间
 
 **建议**：至少提供显式开关（如 `insecureNoAuth: true`）才允许无令牌启动，否则拒绝启动。
 
+> **状态：已修复（2026-11-17）。** 新增 `allowInsecureHTTP` 配置项；endpoint 非 https 且非回环地址（localhost / 127.0.0.1）又未显式开启时，`NewS3` 直接拒绝创建。本地 MinIO 等回环地址仍可直接用 http。
+
 ### 5.（低）S3 允许明文 HTTP + `UNSIGNED-PAYLOAD`
 
 `internal/storage/s3.go:101` 对所有请求使用 `UNSIGNED-PAYLOAD`，且 `endpoint` 允许 `http://`。此时对象数据明文传输、且请求体不被签名保护，存在中间人窜改 / 窃听风险（凭据本身仍受 SigV4 头签名保护）。
@@ -102,11 +104,15 @@ t, ok := s.tokens[auth[len(prefix):]]   // map 查找，非恒定时间
 
 **建议**：500 对外返回通用文案，详细错误只写服务端日志。
 
+> **状态：已修复（2026-11-17）。** 新增 `-token-file` 选项（优先于 `-token`），从文件读取令牌避免其出现在进程列表；`-token` 帮助文案也提示优先用环境变量 / 文件。
+
 ### 7.（低）CLI `-token` 泄漏到进程列表
 
 `cmd/qentimart/main.go:91` 支持 `-token` 命令行传参。命令行参数在多数系统上对同机其他用户可见（`ps`、`/proc`）。已同时支持 `QENTIMART_TOKEN` 环境变量（较优）。
 
 **建议**：文档中优先推荐环境变量 / 配置文件；或支持从文件 / stdin 读取令牌。
+
+> **状态：已修复（2026-11-17）。** Java `validatePath` 已与 Go `ValidatePath` 对齐：新增长度上限（1024）、段尾 `.`/空格 拦截、控制字符（< 0x20）与 Windows 保留字符 `\<>:"|?*` 拦截（盘符 `:` 亦被覆盖）。
 
 ### 8.（低）Java `validatePath` 弱于 Go 版
 
@@ -115,6 +121,8 @@ t, ok := s.tokens[auth[len(prefix):]]   // map 查找，非恒定时间
 在“对接合法服务端”场景下服务端已严格校验，但该客户端校验正是为“恶意服务端 / 静态源”准备的第二道防线，理应与服务端一致。非穿越漏洞，属健壮性。
 
 **建议**：使 Java 侧校验与 Go 侧 `ValidatePath` 对齐。
+
+> **状态：已修复（2026-11-17）。** 新增 `maxProjects` 配置项（默认 100000）；常驻项目数达上限后对新项目名返回 503，不再无界增长。
 
 ### 9.（信息）已鉴权请求可无限增长 `projects` map
 
@@ -137,6 +145,6 @@ t, ok := s.tokens[auth[len(prefix):]]   // map 查找，非恒定时间
 
 ## 优先处理建议
 
-1. ~~先修 #1、#2（Java SDK 下载 / 解压上限）~~ ✅ 已完成。
-2. ~~再做 #3、#4、#6 的服务端加固~~ ✅ 已完成。
-3. 剩余 #5（S3 明文 HTTP）、#7（CLI `-token`）、#8（Java 路径校验对齐）、#9（项目 map 上限）为文档 / 健壮性改进，可按需跟进。
+全部 9 条均已修复（2026-11-17）：#1/#2 见 commit `c15d523`，#3/#4/#6 见 `70bb275`，#5/#7/#8/#9 本次提交。
+
+后续仍建议（不属本次范围）：为 `inflateRaw` / `readCapped` 等防护逻辑补单元测试；S3 对 http endpoint 仍为 `UNSIGNED-PAYLOAD`，如需请求体完整性可考虑签名真实 payload 哈希。

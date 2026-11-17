@@ -112,7 +112,12 @@ func (s *Server) auth(role int, h handlerFunc) http.Handler {
 			s.writeErr(w, &httpError{http.StatusUnauthorized, "missing or insufficient token"})
 			return
 		}
-		if err := h(w, r, s.getProject(name)); err != nil {
+		p, err := s.getProject(name)
+		if err != nil {
+			s.writeErr(w, err)
+			return
+		}
+		if err := h(w, r, p); err != nil {
 			s.writeErr(w, err)
 		}
 	})

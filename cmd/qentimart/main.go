@@ -42,7 +42,7 @@ const usage = `QentimArt 客户端 %s
   qentimart gc             --static -o DIR [-dry-run]
 
 连接参数（也可使用环境变量 QENTIMART_SERVER / QENTIMART_PROJECT / QENTIMART_TOKEN）:
-  -server URL   -project NAME   -token TOKEN
+  -server URL   -project NAME   -token TOKEN   [-token-file PATH]
 
 启动服务端、生成令牌请使用 qentimart-server 命令。
 `
@@ -82,13 +82,14 @@ func main() {
 	}
 }
 
-type conn struct{ server, project, token *string }
+type conn struct{ server, project, token, tokenFile *string }
 
 func connFlags(fs *flag.FlagSet) conn {
 	return conn{
-		server:  fs.String("server", os.Getenv("QENTIMART_SERVER"), "服务器 URL"),
-		project: fs.String("project", os.Getenv("QENTIMART_PROJECT"), "项目名称"),
-		token:   fs.String("token", os.Getenv("QENTIMART_TOKEN"), "API 令牌"),
+		server:    fs.String("server", os.Getenv("QENTIMART_SERVER"), "服务器 URL"),
+		project:   fs.String("project", os.Getenv("QENTIMART_PROJECT"), "项目名称"),
+		token:     fs.String("token", os.Getenv("QENTIMART_TOKEN"), "API 令牌（命令行传入会出现在进程列表中；优先用 QENTIMART_TOKEN 或 -token-file）"),
+		tokenFile: fs.String("token-file", "", "从文件读取 API 令牌（优先于 -token，避免令牌出现在进程列表中）"),
 	}
 }
 
@@ -96,7 +97,15 @@ func (c conn) client(concurrency int) (*publish.Client, error) {
 	if *c.server == "" || *c.project == "" {
 		return nil, errors.New("-server and -project are required")
 	}
-	return publish.NewClient(*c.server, *c.project, *c.token, concurrency), nil
+	token := *c.token
+	if *c.tokenFile != "" {
+		b, err := os.ReadFile(*c.tokenFile)
+		if err != nil {
+			return nil, fmt.Errorf("read token file: %w", err)
+		}
+		token = strings.TrimSpace(string(b))
+	}
+	return publish.NewClient(*c.server, *c.project, token, concurrency), nil
 }
 
 func cmdPublish(ctx context.Context, args []string) error {

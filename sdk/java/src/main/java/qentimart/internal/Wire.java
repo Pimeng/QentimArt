@@ -194,23 +194,31 @@ public final class Wire {
         return new Manifest(str(doc.get("version")), str(doc.get("createdAt")), files);
     }
 
+    /** 校验路径为可移植的相对路径（规则与服务端 manifest.ValidatePath 保持一致）。 */
     public static void validatePath(String p) {
-        if (p == null || p.isEmpty() || p.indexOf('\\') >= 0 || p.indexOf('\0') >= 0) {
+        if (p == null || p.isEmpty() || p.length() > 1024) {
             throw new QentimArtException("unsafe path " + p);
         }
         String[] segs = p.split("/", -1);
         if (segs.length > 0 && segs[0].toLowerCase(Locale.ROOT).equals(STATE_DIR)) {
-            throw new QentimArtException("unsafe path " + p);
+            throw new QentimArtException("path uses reserved directory " + STATE_DIR + ": " + p);
         }
         for (String s : segs) {
-            if (s.isEmpty() || s.equals(".") || s.equals("..") || isDrive(s)) {
+            if (s.isEmpty() || s.equals(".") || s.equals("..")) {
                 throw new QentimArtException("unsafe path " + p);
             }
+            // 段尾 '.' / ' ' 在 Windows 上不可移植（会被静默去除）。
+            if (s.endsWith(".") || s.endsWith(" ")) {
+                throw new QentimArtException("path not portable to Windows (segment ends with '.' or ' '): " + p);
+            }
+            // 控制字符与 Windows 保留字符（含 '\\' 与盘符 ':'）。
+            for (int i = 0; i < s.length(); i++) {
+                char c = s.charAt(i);
+                if (c < 0x20 || "\\<>:\"|?*".indexOf(c) >= 0) {
+                    throw new QentimArtException("path contains a character not portable to Windows: " + p);
+                }
+            }
         }
-    }
-
-    private static boolean isDrive(String s) {
-        return s.length() == 2 && Character.isLetter(s.charAt(0)) && s.charAt(1) == ':';
     }
 
     /** 在客户端比较两份 manifest（静态模式没有服务端 /diff 接口时使用）。 */
