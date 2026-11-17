@@ -1,0 +1,46 @@
+name: 发布 Node.js SDK 到 npm
+
+# 打形如 nodejs-sdk-v0.1.0 的 tag 时触发，仅发布 sdk/nodejs
+on:
+  push:
+    tags:
+      - "nodejs-sdk-v*"
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # 对应 npm 可信发布者里填写的 environment 名，需在仓库 Settings → Environments 中创建
+    environment: npm
+    permissions:
+      id-token: write # Trusted Publishing 与发布溯源（provenance）均依赖 OIDC，必需
+    defaults:
+      run:
+        working-directory: sdk/nodejs
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: 升级 npm 以支持 OIDC 可信发布
+        run: npm install -g npm@latest
+
+      - name: 校验 tag 版本与 package.json 一致
+        run: |
+          tag_version="${GITHUB_REF_NAME#nodejs-sdk-v}"
+          pkg_version=$(node -p "require('./package.json').version")
+          echo "tag=$tag_version package.json=$pkg_version"
+          if [ "$tag_version" != "$pkg_version" ]; then
+            echo "::error::tag 版本 $tag_version 与 package.json 版本 $pkg_version 不一致"
+            exit 1
+          fi
+
+      - name: 检查打包内容
+        run: npm pack --dry-run
+
+      - name: 发布到 npm
+        # 可信发布下 npm 自动使用 OIDC 凭据并附带 provenance，无需配置 NODE_AUTH_TOKEN
+        run: npm publish --access public

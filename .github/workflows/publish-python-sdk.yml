@@ -1,0 +1,45 @@
+name: 发布 Python SDK 到 PyPI
+
+# 打形如 python-sdk-v0.1.0 的 tag 时触发，仅发布 sdk/python
+on:
+  push:
+    tags:
+      - "python-sdk-v*"
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # 对应 PyPI 可信发布者里填写的 environment 名，需在仓库 Settings → Environments 中创建
+    environment: pypi
+    permissions:
+      id-token: write # Trusted Publishing 通过 OIDC 换取临时凭据，必需
+    defaults:
+      run:
+        working-directory: sdk/python
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: 校验 tag 版本与 pyproject.toml 一致
+        run: |
+          tag_version="${GITHUB_REF_NAME#python-sdk-v}"
+          proj_version=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          echo "tag=$tag_version pyproject=$proj_version"
+          if [ "$tag_version" != "$proj_version" ]; then
+            echo "::error::tag 版本 $tag_version 与 pyproject.toml 版本 $proj_version 不一致"
+            exit 1
+          fi
+
+      - name: 构建发布产物
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+
+      - name: 发布到 PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: sdk/python/dist

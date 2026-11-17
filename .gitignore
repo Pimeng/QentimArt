@@ -1,8 +1,12 @@
 /bin/
+*.exe
 /dist/
+sdk/python/dist/
+sdk/python/build/
 /data/
 /tests/.work/
 node_modules/
+*.tgz
 __pycache__/
 *.pyc
 *.egg-info/
