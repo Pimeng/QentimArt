@@ -145,6 +145,9 @@ t, ok := s.tokens[auth[len(prefix):]]   // map 查找，非恒定时间
 
 ## 优先处理建议
 
-全部 9 条均已修复（2026-11-17）：#1/#2 见 commit `c15d523`，#3/#4/#6 见 `70bb275`，#5/#7/#8/#9 本次提交。
+全部 9 条均已修复（2026-11-17），并补充了针对性单元测试：
 
-后续仍建议（不属本次范围）：为 `inflateRaw` / `readCapped` 等防护逻辑补单元测试；S3 对 http endpoint 仍为 `UNSIGNED-PAYLOAD`，如需请求体完整性可考虑签名真实 payload 哈希。
+- Go：`internal/wire`（解压溢出 / 帧头上限）、`internal/server`（normalize 的无令牌拒绝与 maxProjects 默认值、鉴权拒绝、maxProjects 503）、`internal/storage`（S3 明文 http 策略）。
+- Java：`sdk/java/tests/WireHardening.java`（deflate 炸弹拒绝、rawLen 上限、`validatePath` 对齐），由 `tests/e2e.mjs` 运行。
+
+后续仍可考虑（不属本次范围）：S3 对 http endpoint 仍为 `UNSIGNED-PAYLOAD`，如需请求体完整性可签名真实 payload 哈希。

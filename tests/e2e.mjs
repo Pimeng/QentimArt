@@ -477,7 +477,10 @@ async function main() {
         console.log('\n== Java SDK');
         javaReady = await buildJava();
         if (!javaReady) console.log('  (Java 编译失败，跳过)');
-        else runJava('qentimart.e2e.E2EClient', [server, PROJECT, READ, path.join(WORK, 'java-dst'), expect1, expect2, String(pub2.UploadedRaw)]);
+        else {
+          runJava('qentimart.e2e.WireHardening', []); // 纯单元测试：解压上限 / 路径校验，无需服务端
+          runJava('qentimart.e2e.E2EClient', [server, PROJECT, READ, path.join(WORK, 'java-dst'), expect1, expect2, String(pub2.UploadedRaw)]);
+        }
       } else {
         console.log('\n== Java SDK (未找到 JDK ≥ 21，跳过)');
       }
