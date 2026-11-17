@@ -8,6 +8,14 @@ QentimArt 的 Python 下游客户端，仅使用 Python 标准库，要求 Pytho
 
 ## 安装
 
+已发布到 PyPI：[qentimart-sdk](https://pypi.org/project/qentimart-sdk/)
+
+```bash
+pip install qentimart-sdk
+```
+
+也可以从仓库源码安装：
+
 ```bash
 pip install ./sdk/python
 ```

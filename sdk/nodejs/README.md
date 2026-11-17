@@ -8,8 +8,16 @@ QentimArt 的 Node.js 下游客户端，用于将本地目录增量同步到指�
 
 ## 安装
 
+已发布到 npm：[@qentimart/sdk](https://www.npmjs.com/package/@qentimart/sdk)；国内可用镜像 [npmmirror](https://npmmirror.com/package/@qentimart/sdk)
+
 ```bash
-npm install ./sdk/nodejs        # 或发布到私有 npm 源后执行 npm install @qentimart/sdk
+npm install @qentimart/sdk
+```
+
+也可以从仓库源码安装：
+
+```bash
+npm install ./sdk/nodejs
 ```
 
 ## 快速开始
