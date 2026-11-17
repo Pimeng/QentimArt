@@ -6,7 +6,7 @@ import { QentimArtClient, SyncConflictError } from '../src/index.js';
 const HELP = `qentimart-node <command> [options]
 
 命令：
-  sync      --dir DIR [--version latest] [--local-changes overwrite|keep|fail] [--prerelease] [--verify-all] [--verify-paths a,b/] [--delete-untracked-on-first-sync]
+  sync      --dir DIR [--version latest] [--local-changes overwrite|keep|fail] [--prerelease] [--verify-all] [--verify-paths a,b/] [--delete-untracked] [--delete-untracked-on-first-sync]
   plan      --dir DIR [--version latest]          试运行（只计算同步计划）
   status    --dir DIR                             本地相对上次同步版本的改动
   verify    --dir DIR                             重新计算每个文件的哈希
@@ -32,6 +32,7 @@ const { values, positionals } = parseArgs({
     prerelease: { type: 'boolean', default: false },
     'verify-all': { type: 'boolean', default: false },
     'verify-paths': { type: 'string' },
+    'delete-untracked': { type: 'boolean', default: false },
     'delete-untracked-on-first-sync': { type: 'boolean', default: false },
     concurrency: { type: 'string', default: '8' },
     json: { type: 'boolean', default: false },
@@ -95,6 +96,7 @@ async function main() {
           prerelease: values.prerelease,
           verifyAll: values['verify-all'],
           verifyPaths: values['verify-paths'] ? values['verify-paths'].split(',').filter(Boolean) : [],
+          deleteUntracked: values['delete-untracked'],
           deleteUntrackedOnFirstSync: values['delete-untracked-on-first-sync'],
           onProgress: values.json
             ? undefined

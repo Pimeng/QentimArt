@@ -48,6 +48,7 @@ public final class Planner {
         public Path root;
         public String policy;
         public boolean verifyAll;
+        public boolean deleteUntracked;
         public boolean deleteUntrackedOnFirstSync;
         public Map<String, LocalFile> files;
         public Set<String> dirs;
@@ -126,11 +127,24 @@ public final class Planner {
         for (Map.Entry<String, LocalFile> e : ctx.files.entrySet()) {
             String p = e.getKey();
             if (target.files.containsKey(p)) continue;
-            // 安全措施：在从未同步过的目录中，未知文件仅在明确要求时才会被删除。
-            boolean mayDelete = policy.equals("overwrite") && (ctx.hasState || ctx.deleteUntrackedOnFirstSync);
-            if (isClean(ctx, old, p, e.getValue()) || mayDelete) {
+            // 受管文件（曾被同步、现已从清单移除）且本地未改动：正常清理，不受下列开关影响。
+            if (isClean(ctx, old, p, e.getValue())) {
                 plan.toDelete.add(p);
-            } else if (policy.equals("overwrite") || policy.equals("keep")) {
+                continue;
+            }
+            // 该文件是否属于 SDK 受管范围：曾记录在状态里，或存在于旧清单中。
+            boolean managed = ctx.tracked.containsKey(p) || old.containsKey(p);
+            if (policy.equals("overwrite")) {
+                if (managed) {
+                    // 受管但本地有改动：overwrite 语义为「以服务端为准还原」，服务端已无此文件 → 删除。
+                    plan.toDelete.add(p);
+                } else {
+                    // 真正未跟踪的本地文件（用户自带、从不在清单内）：默认绝不删除，避免误伤并存资源。
+                    // 仅当显式 deleteUntracked 开启才删；首次同步（无状态）另需 deleteUntrackedOnFirstSync 兜底。
+                    boolean mayDelete = ctx.hasState ? ctx.deleteUntracked : (ctx.deleteUntracked && ctx.deleteUntrackedOnFirstSync);
+                    (mayDelete ? plan.toDelete : plan.kept).add(p);
+                }
+            } else if (policy.equals("keep")) {
                 plan.kept.add(p);
             } else {
                 plan.conflicts.add(p);

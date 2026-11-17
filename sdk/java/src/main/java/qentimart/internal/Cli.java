@@ -32,6 +32,7 @@ public final class Cli {
                 switch (key) {
                     case "prerelease":
                     case "verify-all":
+                    case "delete-untracked":
                     case "delete-untracked-on-first-sync":
                     case "json":
                         flags.add(key);
@@ -141,6 +142,7 @@ public final class Cli {
                         SyncOptions o = new SyncOptions().version(version).localChanges(localChanges)
                                 .prerelease(flags.contains("prerelease"))
                                 .verifyAll(flags.contains("verify-all"))
+                                .deleteUntracked(flags.contains("delete-untracked"))
                                 .deleteUntrackedOnFirstSync(flags.contains("delete-untracked-on-first-sync"));
                         String vpStr = opt.get("verify-paths");
                         if (vpStr != null && !vpStr.isEmpty()) {

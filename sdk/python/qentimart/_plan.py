@@ -31,6 +31,7 @@ class PlanContext(NamedTuple):
     root: str
     policy: str
     verify_all: bool
+    delete_untracked: bool
     delete_untracked_on_first_sync: bool
     files: Dict[str, LocalFile]
     dirs: Set[str]
@@ -109,11 +110,22 @@ def build_plan(ctx: PlanContext, target: Manifest) -> Plan:
     for p, l in ctx.files.items():
         if p in target.files:
             continue
-        # 安全措施：在从未同步过的目录中，未知文件仅在明确要求时才会被删除。
-        may_delete = policy == "overwrite" and (ctx.has_state or ctx.delete_untracked_on_first_sync)
-        if is_clean(p, l) or may_delete:
+        # 受管文件（曾被同步、现已从清单移除）且本地未改动：正常清理，不受下列开关影响。
+        if is_clean(p, l):
             plan.to_delete.append(p)
-        elif policy in ("overwrite", "keep"):
+            continue
+        # 该文件是否属于 SDK 受管范围：曾记录在状态里，或存在于旧清单中。
+        managed = p in ctx.tracked or p in old
+        if policy == "overwrite":
+            if managed:
+                # 受管但本地有改动：overwrite 语义为「以服务端为准还原」，服务端已无此文件 → 删除。
+                plan.to_delete.append(p)
+            else:
+                # 真正未跟踪的本地文件（用户自带、从不在清单内）：默认绝不删除，避免误伤并存资源。
+                # 仅当显式 delete_untracked 开启才删；首次同步（无状态）另需 delete_untracked_on_first_sync 兜底。
+                may_delete = ctx.delete_untracked if ctx.has_state else (ctx.delete_untracked and ctx.delete_untracked_on_first_sync)
+                (plan.to_delete if may_delete else plan.kept).append(p)
+        elif policy == "keep":
             plan.kept.append(p)
         else:
             plan.conflicts.append(p)

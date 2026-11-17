@@ -65,8 +65,9 @@ try (QentimArtClient client = QentimArtClient.staticClient("https://mygame.pages
 | 参数 | 默认值 | 说明 |
 |---|---|---|
 | `version` | `"latest"` | 目标版本号 |
-| `localChanges` | `"overwrite"` | `overwrite` 还原本地改动并删除多余文件；`keep` 保留本地改动与新增文件；`fail` 发现冲突抛出 `SyncConflictException`，不改动磁盘 |
-| `deleteUntrackedOnFirstSync` | `false` | 从未同步过的目录首次执行 `overwrite` 时，默认不清理目录里原有的其他文件；设为 `true` 才会删除 |
+| `localChanges` | `"overwrite"` | `overwrite` 把受管文件还原为服务端版本；`keep` 保留本地改动与新增文件；`fail` 发现冲突抛出 `SyncConflictException`，不改动磁盘 |
+| `deleteUntracked` | `false` | 是否删除「未跟踪」文件（本地存在、不在目标版本、也从不受 SDK 管理的文件）。默认即便 `overwrite` 也绝不删除这类文件，适合「只同步某子树、其余本地文件保留」的场景；设为 `true` 才在 `overwrite` 下一并清理。清单内「被移除的受管文件」始终照常清理 |
+| `deleteUntrackedOnFirstSync` | `false` | 安全兜底：从未同步过的目录首次执行时，即使 `deleteUntracked=true` 也仍保留未跟踪文件，防止传错路径误删整个目录；设为 `true` 才允许首次同步清理 |
 | `prerelease` | `false` | 允许 `latest` 解析到预发布版本 |
 | `verifyAll` | `false` | 跳过 `size + mtime` 快速检查，对所有本地文件重算哈希 |
 | `verifyPaths` | `[]` | 对指定的相对路径强制重算哈希校验（以 `/` 结尾表示目录前缀），其余文件仍走快速检查 |

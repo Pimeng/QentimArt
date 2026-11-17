@@ -148,14 +148,19 @@ class QentimArtClient:
         return self.sync(dir, **kwargs)
 
     def sync(self, dir: str, version: str = "latest", local_changes: str = "overwrite", prerelease: bool = False,
-             verify_all: bool = False, dry_run: bool = False, delete_untracked_on_first_sync: bool = False,
+             verify_all: bool = False, dry_run: bool = False, delete_untracked: bool = False,
+             delete_untracked_on_first_sync: bool = False,
              on_progress: Optional[ProgressFn] = None, cancel_event: Optional[threading.Event] = None,
              verify_paths: Optional[Any] = None) -> Dict[str, Any]:
         """将 ``dir`` 同步到 ``version``（升级或降级）。
 
-        local_changes：'overwrite'（默认）恢复服务端文件并删除多余文件；
+        local_changes：'overwrite'（默认）把受管文件还原为服务端版本；
         'keep' 不触碰本地已修改/未跟踪的文件；'fail' 在改动任何内容之前
         抛出 SyncConflictError。
+
+        delete_untracked：是否删除「未跟踪」文件（本地存在、不在目标版本、也从不受
+        SDK 管理的文件）。默认 False，即便 overwrite 也绝不删除这类文件；设为 True
+        才在 overwrite 下一并清理。清单内「被移除的受管文件」始终照常清理。
         """
         if local_changes not in ("overwrite", "keep", "fail"):
             raise QentimArtError("invalid local_changes %r" % local_changes)
@@ -204,6 +209,7 @@ class QentimArtClient:
 
             ctx = PlanContext(
                 root=root, policy=local_changes, verify_all=verify_all,
+                delete_untracked=delete_untracked,
                 delete_untracked_on_first_sync=delete_untracked_on_first_sync, files=files, dirs=dirs,
                 old=old_manifest if same_project else None,
                 tracked=dict(state.get("files") or {}) if same_project else {},

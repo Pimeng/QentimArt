@@ -158,13 +158,29 @@ async function buildPlan(ctx, target) {
 
   for (const [p, l] of local.files) {
     if (target.files.has(p)) continue;
-    // 安全措施：对于从未同步过的目录，未知文件只有在显式要求时才会被删除
-    // （防止误传了错误的 `dir`）。
-    const mayDelete = policy === 'overwrite' && (ctx.hasState || opts.deleteUntrackedOnFirstSync);
-    if (isClean(p, l) || mayDelete) plan.toDelete.push(p);
-    else if (policy === 'overwrite') plan.kept.push(p);
-    else if (policy === 'keep') plan.kept.push(p);
-    else plan.conflicts.push(p);
+    // 受管文件（曾被同步、现已从清单移除）且本地未改动：正常清理，不受下列开关影响。
+    if (isClean(p, l)) {
+      plan.toDelete.push(p);
+      continue;
+    }
+    // 该文件是否属于 SDK 受管范围：曾记录在状态里，或存在于旧清单中。
+    const managed = tracked[p] !== undefined || old.has(p);
+    if (policy === 'overwrite') {
+      if (managed) {
+        // 受管但本地有改动：overwrite 语义为「以服务端为准还原」，服务端已无此文件 → 删除。
+        plan.toDelete.push(p);
+      } else {
+        // 真正未跟踪的本地文件（用户自带、从不在清单内）：默认绝不删除，避免误伤并存资源。
+        // 仅当显式 deleteUntracked 开启才删；首次同步（无状态）另需 deleteUntrackedOnFirstSync 兜底。
+        const mayDelete = ctx.hasState ? opts.deleteUntracked : opts.deleteUntracked && opts.deleteUntrackedOnFirstSync;
+        if (mayDelete) plan.toDelete.push(p);
+        else plan.kept.push(p);
+      }
+    } else if (policy === 'keep') {
+      plan.kept.push(p);
+    } else {
+      plan.conflicts.push(p);
+    }
   }
   plan.toWrite.sort((a, b) => (a.t.path < b.t.path ? -1 : 1));
   plan.toDelete.sort();
@@ -235,6 +251,7 @@ export async function runSync(client, dir, opts) {
   opts = {
     version: 'latest',
     localChanges: 'overwrite',
+    deleteUntracked: false,
     prerelease: false,
     verifyAll: false,
     verifyPaths: [],

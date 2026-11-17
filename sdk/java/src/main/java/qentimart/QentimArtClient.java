@@ -274,6 +274,7 @@ public final class QentimArtClient implements AutoCloseable {
             ctx.root = root;
             ctx.policy = policy;
             ctx.verifyAll = o.verifyAll;
+            ctx.deleteUntracked = o.deleteUntracked;
             ctx.deleteUntrackedOnFirstSync = o.deleteUntrackedOnFirstSync;
             ctx.files = scan.files();
             ctx.dirs = scan.dirs();

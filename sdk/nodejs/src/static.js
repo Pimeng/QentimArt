@@ -1,10 +1,28 @@
 import http from 'node:http';
 import https from 'node:https';
+import zlib from 'node:zlib';
 import { QentimArtError } from './http.js';
 import { pool } from './localfs.js';
 import { decodeBlob } from './frames.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// 按响应的 Content-Encoding 透明解压：node:http(s) 不会自动处理传输层编码，
+// 而很多 CDN / 对象存储会对 index.json 之类的响应强制 gzip（即便请求 identity）。
+// 以响应头为准解码，对不带该头的 .gz 清单和原始 chunk 零影响。
+function decodeBody(buf, encoding) {
+  switch (String(encoding || '').toLowerCase().trim()) {
+    case 'gzip':
+    case 'x-gzip':
+      return zlib.gunzipSync(buf);
+    case 'deflate':
+      return zlib.inflateSync(buf);
+    case 'br':
+      return zlib.brotliDecompressSync(buf);
+    default:
+      return buf;
+  }
+}
 
 /**
  * 静态模式的只读传输：从一个公开的 baseUrl（对象存储 / CDN / Cloudflare Pages）
@@ -48,7 +66,13 @@ export class StaticTransport {
           }
           const chunks = [];
           res.on('data', (c) => chunks.push(c));
-          res.on('end', () => resolve(Buffer.concat(chunks)));
+          res.on('end', () => {
+            try {
+              resolve(decodeBody(Buffer.concat(chunks), res.headers['content-encoding']));
+            } catch (err) {
+              reject(new QentimArtError(`GET ${relPath}: cannot decode response body: ${err.message}`, { code: err.code, cause: err }));
+            }
+          });
           res.on('error', reject);
         },
       );

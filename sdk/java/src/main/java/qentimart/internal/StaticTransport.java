@@ -65,9 +65,13 @@ public final class StaticTransport implements AutoCloseable {
                     throw new QentimArtException("GET " + rel + ": HTTP " + resp.statusCode(), resp.statusCode(), null);
                 }
                 // 按 max 设上限读取，防止被攻陷的公开静态源用超大响应体耗尽客户端内存。
+                byte[] raw;
                 try (InputStream in = resp.body()) {
-                    return Wire.readCapped(in, max, "GET " + rel);
+                    raw = Wire.readCapped(in, max, "GET " + rel);
                 }
+                // 按 Content-Encoding 透明解压（CDN 常对 index.json 强制 gzip）。
+                String enc = resp.headers().firstValue("Content-Encoding").orElse(null);
+                return Wire.decodeBody(raw, enc, max);
             } catch (QentimArtException e) {
                 if (e.status >= 0 && e.status < 500 && e.status != 429) throw e;
                 last = e;

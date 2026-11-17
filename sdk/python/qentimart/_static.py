@@ -1,17 +1,45 @@
 """静态模式的只读传输：从公开 baseUrl 按对象键 GET，不需要鉴权。"""
 from __future__ import annotations
 
+import gzip
 import http.client
 import json
 import ssl
 import threading
 import time
+import zlib
 from typing import Any, Callable, Optional
 from urllib.parse import urlsplit
 
 from ._errors import QentimArtError
 from ._localfs import run_pool
 from ._wire import decode_blob
+
+
+def _decode_body(data: bytes, encoding: Optional[str]) -> bytes:
+    """按响应的 Content-Encoding 透明解压：http.client 不会自动处理传输层编码，
+    而很多 CDN / 对象存储会对 index.json 之类的响应强制 gzip（即便请求 identity）。
+    以响应头为准解码，对不带该头的 .gz 清单和原始 chunk 零影响。"""
+    enc = (encoding or "").strip().lower()
+    if enc in ("", "identity"):
+        return data
+    if enc in ("gzip", "x-gzip"):
+        return gzip.decompress(data)
+    if enc == "deflate":
+        try:
+            return zlib.decompress(data)
+        except zlib.error:
+            return zlib.decompress(data, -zlib.MAX_WBITS)  # 裸 deflate（无 zlib 头）
+    if enc == "br":
+        try:
+            import brotli  # type: ignore
+        except ImportError:
+            try:
+                import brotlicffi as brotli  # type: ignore
+            except ImportError:
+                raise QentimArtError("response is brotli-encoded but no 'brotli' package is installed")
+        return brotli.decompress(data)
+    return data  # 未知编码：原样返回，交由上层解析报错
 
 
 class StaticTransport:
@@ -71,12 +99,18 @@ class StaticTransport:
             conn.request("GET", self.base_path + "/" + rel)
             resp = conn.getresponse()
             data = resp.read()
+            encoding = resp.getheader("Content-Encoding")
         except Exception:
             self._drop_conn()
             raise
         if resp.status >= 300:
             raise QentimArtError("GET %s: HTTP %d" % (rel, resp.status), status=resp.status)
-        return data
+        try:
+            return _decode_body(data, encoding)
+        except QentimArtError:
+            raise
+        except Exception as e:
+            raise QentimArtError("GET %s: cannot decode response body: %s" % (rel, e))
 
     def get_buffer(self, rel: str, cancel: Optional[threading.Event] = None) -> bytes:
         last: Optional[BaseException] = None

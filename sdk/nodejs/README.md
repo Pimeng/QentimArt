@@ -67,8 +67,9 @@ await client.sync('./assets', { version: '1.0.0' });
 | 选项 | 默认值 | 说明 |
 |---|---|---|
 | `version` | `'latest'` | 目标版本号，如 `'1.0.0'` |
-| `localChanges` | `'overwrite'` | 本地存在改动或多余文件时的行为：`overwrite` 覆盖还原并删除多余文件；`keep` 保留本地改动，只更新其余文件；`fail` 抛出 `SyncConflictError` 并中止，不写任何文件 |
-| `deleteUntrackedOnFirstSync` | `false` | 目录首次同步（尚无 `.qentimart` 记录）时默认不删目录里原有的其他文件，防止传错路径误删数据；设为 `true` 则首次同步也清理多余文件 |
+| `localChanges` | `'overwrite'` | 本地改动的处理方式：`overwrite` 把受管文件还原为服务端版本；`keep` 保留本地改动，只更新其余文件；`fail` 抛出 `SyncConflictError` 并中止，不写任何文件 |
+| `deleteUntracked` | `false` | 是否删除「未跟踪」文件（本地存在、不在目标版本、也从不受 SDK 管理的文件）。默认即便 `overwrite` 也绝不删除这类文件，适合「只同步某子树、其余本地文件保留」的场景；设为 `true` 才在 `overwrite` 下一并清理这些多余文件。清单内「被移除的受管文件」始终照常清理，不受此开关影响 |
+| `deleteUntrackedOnFirstSync` | `false` | 安全兜底：目录首次同步（尚无 `.qentimart` 记录）时，即使 `deleteUntracked=true` 也仍保留未跟踪文件，防止传错路径误删整个目录；设为 `true` 才允许首次同步清理 |
 | `prerelease` | `false` | `version` 为 `'latest'` 时允许解析到预发布版本 |
 | `verifyAll` | `false` | 跳过 `size + mtime` 快速判断，对本地所有文件强制算哈希 |
 | `verifyPaths` | `[]` | 对列出的相对路径强制算哈希校验（以 `/` 结尾代表整个子目录），其余文件仍用 `size + mtime` 快速检查 |

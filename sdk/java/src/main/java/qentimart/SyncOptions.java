@@ -22,7 +22,14 @@ public final class SyncOptions {
     public List<String> verifyPaths = new ArrayList<>();
     /** 试运行（dry run），不改动磁盘。 */
     public boolean dryRun = false;
-    /** 安全开关：从未同步过的目录是否删除不属于目标版本的文件。 */
+    /**
+     * 是否删除「未跟踪」文件（本地存在、不在目标版本、也从不受 SDK 管理的文件）。
+     * 默认 false，即便 localChanges="overwrite" 也绝不删除这类文件，适合「只同步某子树、
+     * 其余本地文件保留」的场景；设为 true 才在 overwrite 下一并清理。
+     * 清单内「被移除的受管文件」始终照常清理，不受此开关影响。
+     */
+    public boolean deleteUntracked = false;
+    /** 安全兜底：从未同步过的目录首次执行时，即使 deleteUntracked=true 仍保留未跟踪文件，除非此项也为 true。 */
     public boolean deleteUntrackedOnFirstSync = false;
     /** 进度回调。 */
     public Consumer<ProgressEvent> onProgress = null;
@@ -38,6 +45,7 @@ public final class SyncOptions {
     public SyncOptions verifyAll(boolean v) { this.verifyAll = v; return this; }
     public SyncOptions verifyPaths(List<String> v) { this.verifyPaths = v; return this; }
     public SyncOptions dryRun(boolean v) { this.dryRun = v; return this; }
+    public SyncOptions deleteUntracked(boolean v) { this.deleteUntracked = v; return this; }
     public SyncOptions deleteUntrackedOnFirstSync(boolean v) { this.deleteUntrackedOnFirstSync = v; return this; }
     public SyncOptions onProgress(Consumer<ProgressEvent> v) { this.onProgress = v; return this; }
     public SyncOptions cancel(AtomicBoolean v) { this.cancel = v; return this; }

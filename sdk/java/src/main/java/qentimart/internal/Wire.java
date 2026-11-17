@@ -26,6 +26,7 @@ import java.util.Set;
 import java.util.zip.DataFormatException;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.Inflater;
+import java.util.zip.InflaterInputStream;
 
 /** 块帧流、静态 blob、manifest 解析与路径校验（参见 docs/PROTOCOL.md）。 */
 public final class Wire {
@@ -313,6 +314,46 @@ public final class Wire {
     public static byte[] gunzip(byte[] gz, long max) throws IOException {
         try (GZIPInputStream gis = new GZIPInputStream(new ByteArrayInputStream(gz))) {
             return readCapped(gis, max, "manifest");
+        }
+    }
+
+    /**
+     * 按响应的 Content-Encoding 透明解压：HttpClient 不会自动处理传输层编码，
+     * 而很多 CDN / 对象存储会对 index.json 之类的响应强制 gzip（即便请求 identity）。
+     * 以响应头为准解码，对不带该头的 .gz 清单和原始 chunk 零影响；解压结果同样受
+     * max 上限约束，防止被压缩炸弹耗尽内存。
+     */
+    public static byte[] decodeBody(byte[] data, String encoding, long max) {
+        String enc = encoding == null ? "" : encoding.trim().toLowerCase(Locale.ROOT);
+        try {
+            switch (enc) {
+                case "":
+                case "identity":
+                    return data;
+                case "gzip":
+                case "x-gzip":
+                    try (GZIPInputStream gis = new GZIPInputStream(new ByteArrayInputStream(data))) {
+                        return readCapped(gis, max, "response body");
+                    }
+                case "deflate":
+                    return inflateBody(data, max);
+                case "br":
+                    throw new QentimArtException("response is brotli-encoded but Java has no built-in brotli decoder", -1, "EUNSUPPORTED");
+                default:
+                    return data; // 未知编码：原样返回，交由上层解析报错
+            }
+        } catch (IOException e) {
+            throw new QentimArtException("cannot decode response body: " + e.getMessage(), -1, "EDECODE");
+        }
+    }
+
+    private static byte[] inflateBody(byte[] data, long max) throws IOException {
+        try (InflaterInputStream iis = new InflaterInputStream(new ByteArrayInputStream(data))) {
+            return readCapped(iis, max, "response body"); // zlib 包装（有头）
+        } catch (IOException e) {
+            try (InflaterInputStream iis = new InflaterInputStream(new ByteArrayInputStream(data), new Inflater(true))) {
+                return readCapped(iis, max, "response body"); // 裸 deflate（无头）
+            }
         }
     }
 

@@ -99,9 +99,16 @@ export interface SyncOptions {
    */
   localChanges?: LocalChangesPolicy;
   /**
+   * 是否删除「未跟踪」文件（本地存在、不在目标版本、也从不受 SDK 管理的文件）。
+   * 默认 false：即便 localChanges='overwrite' 也绝不删除这类文件，适合「只同步某子树、
+   * 其余本地文件保留」的场景。设为 true 才会在 overwrite 下清理这些多余文件。
+   * 注意：清单内「被移除的受管文件」始终照常清理，不受此开关影响。
+   */
+  deleteUntracked?: boolean;
+  /**
    * 安全开关：对于从未同步过的目录（没有 .qentimart 状态），即使
-   * localChanges='overwrite'，不属于目标版本的文件也会被保留，
-   * 除非此项为 true。
+   * deleteUntracked=true，未跟踪文件仍会被保留，除非此项也为 true
+   * （防止误传了错误的 dir 把整个目录清空）。
    */
   deleteUntrackedOnFirstSync?: boolean;
   /** 允许 "latest" 解析到预发布版本。 */
