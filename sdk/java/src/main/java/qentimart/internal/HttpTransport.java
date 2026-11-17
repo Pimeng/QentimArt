@@ -80,7 +80,7 @@ public final class HttpTransport implements AutoCloseable {
         if (resp.statusCode() >= 300) {
             byte[] data;
             try (InputStream in = resp.body()) {
-                data = in.readAllBytes();
+                data = in.readNBytes(64 * 1024); // 错误体只取前 64 KiB，避免恶意服务端用超大错误体耗尽内存
             }
             throw httpError(method, path, resp.statusCode(), data);
         }
@@ -91,20 +91,32 @@ public final class HttpTransport implements AutoCloseable {
         return withRetry(n -> {
             HttpResponse<InputStream> r = sendStream(method, path, body, null);
             try (InputStream in = r.body()) {
-                return in.readAllBytes();
+                return Wire.readCapped(in, Wire.MAX_JSON, method + " " + path);
             }
         }, null);
     }
 
-    /** 缓冲响应并保留响应头（用于读取 X-QentimArt-Version）。 */
-    public HttpResponse<byte[]> bufferResponse(String method, String path) {
+    /** 带大小上限读取的下载：响应体字节 + 一个响应头的值。 */
+    public static final class Download {
+        public final byte[] body;
+        public final String header;
+
+        Download(byte[] body, String header) {
+            this.body = body;
+            this.header = header;
+        }
+    }
+
+    /** GET 一个响应，body 读取上限为 max 字节，并取出 headerName 指定的响应头（如 X-QentimArt-Version）。 */
+    public Download download(String method, String path, long max, String headerName) {
         return withRetry(n -> {
-            HttpRequest.Builder b = HttpRequest.newBuilder(URI.create(origin + prefix + path)).timeout(timeout);
-            if (token != null && !token.isEmpty()) b.header("Authorization", "Bearer " + token);
-            b.method(method, BodyPublishers.noBody());
-            HttpResponse<byte[]> resp = client.send(b.build(), BodyHandlers.ofByteArray());
-            if (resp.statusCode() >= 300) throw httpError(method, path, resp.statusCode(), resp.body());
-            return resp;
+            HttpResponse<InputStream> r = sendStream(method, path, null, null);
+            byte[] body;
+            try (InputStream in = r.body()) {
+                body = Wire.readCapped(in, max, method + " " + path);
+            }
+            String h = headerName == null ? null : r.headers().firstValue(headerName).orElse(null);
+            return new Download(body, h);
         }, null);
     }
 

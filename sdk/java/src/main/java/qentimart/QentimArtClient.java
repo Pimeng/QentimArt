@@ -143,13 +143,13 @@ public final class QentimArtClient implements AutoCloseable {
         if (mode.equals("static")) {
             Map<String, Object> vi = getVersion(version, prerelease);
             String v = vi.get("version").toString();
-            byte[] gz = stat.getBuffer("versions/" + v + "/manifest.json.gz", null);
+            byte[] gz = stat.getBuffer("versions/" + v + "/manifest.json.gz", Wire.MAX_MANIFEST_GZ, null);
             return new ManifestRaw(v, gz);
         }
-        HttpResponse<byte[]> r = http.bufferResponse("GET",
-                "/versions/" + HttpTransport.pctEncode(version) + "/manifest" + (prerelease ? "?prerelease=1" : ""));
-        String v = r.headers().firstValue("X-QentimArt-Version").orElse(null);
-        return new ManifestRaw(v, r.body());
+        HttpTransport.Download d = http.download("GET",
+                "/versions/" + HttpTransport.pctEncode(version) + "/manifest" + (prerelease ? "?prerelease=1" : ""),
+                Wire.MAX_MANIFEST_GZ, "X-QentimArt-Version");
+        return new ManifestRaw(d.header, d.body);
     }
 
     public Manifest fetchManifest(String version, boolean prerelease) {

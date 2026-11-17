@@ -38,6 +38,19 @@ public final class Wire {
     public static final int ENC_DEFLATE = 1;
     public static final int ENC_MISSING = 0xFF;
 
+    // 以下大小上限用于约束“来自远端（服务端 / 公开静态源）”的数据体积，
+    // 防止被攻陷或恶意的来源用超大 / 解压炸弹响应耗尽客户端内存。
+    /** 单个块原始大小上限（与服务端 wire.MaxChunkSize 保持一致）。 */
+    public static final int MAX_CHUNK_SIZE = 16 << 20;
+    /** 静态 blob 对象下载上限（blob 头 + 最大块 + deflate 余量）。 */
+    public static final int MAX_BLOB_SIZE = 5 + MAX_CHUNK_SIZE + 1024;
+    /** 压缩 manifest 下载上限（与服务端上传上限 maxManifestUpload 一致）。 */
+    public static final int MAX_MANIFEST_GZ = 256 << 20;
+    /** 解压后 manifest 大小上限（与服务端 maxManifestBytes 一致）。 */
+    public static final long MAX_MANIFEST_RAW = 1L << 30;
+    /** JSON 响应（版本目录 / index.json）下载上限。 */
+    public static final int MAX_JSON = 64 << 20;
+
     /** 帧回调。 */
     public interface FrameSink {
         void frame(String hashHex, int enc, long rawLen, byte[] payload) throws Exception;
@@ -61,6 +74,10 @@ public final class Wire {
             int enc = hdr[32] & 0xFF;
             long rawLen = u32(hdr, 33);
             long stored = u32(hdr, 37);
+            // 在按 stored 分配内存前先校验上限，防止恶意服务端用超大帧头耗尽内存。
+            if (stored > MAX_CHUNK_SIZE + 1024 || (enc != ENC_MISSING && rawLen > MAX_CHUNK_SIZE)) {
+                throw new QentimArtException("frame too large (" + rawLen + "/" + stored + ")", -1, "ECORRUPT");
+            }
             byte[] payload = new byte[(int) stored];
             try {
                 d.readFully(payload);
@@ -73,6 +90,9 @@ public final class Wire {
 
     /** 解码一个帧 payload（根据 enc 可能需要 inflate），并校验长度与 SHA-256。 */
     public static byte[] decodeChunk(String hashHex, int enc, long rawLen, byte[] payload) {
+        if (enc != ENC_MISSING && (rawLen < 0 || rawLen > MAX_CHUNK_SIZE)) {
+            throw new QentimArtException("chunk " + hashHex + ": declared length " + rawLen + " exceeds limit", -1, "ECORRUPT");
+        }
         byte[] raw;
         if (enc == ENC_RAW) {
             raw = payload;
@@ -99,34 +119,42 @@ public final class Wire {
         return decodeChunk(hashHex, enc, rawLen, Arrays.copyOfRange(buf, 5, buf.length));
     }
 
-    private static byte[] inflateRaw(String hashHex, byte[] payload, int rawLenHint) {
+    // inflateRaw 以 rawLen（调用方已校验 <= MAX_CHUNK_SIZE）为硬上限进行解压：
+    // 直接解压进固定大小的输出缓冲，若解压结果超出 rawLen 立即报错，
+    // 从而防止 deflate 炸弹（极小 payload 膨胀成数 GB）耗尽客户端内存。
+    private static byte[] inflateRaw(String hashHex, byte[] payload, int rawLen) {
         Inflater inf = new Inflater(true);
         inf.setInput(payload);
-        ByteArrayOutputStream out = new ByteArrayOutputStream(Math.max(rawLenHint, 64));
-        byte[] tmp = new byte[1 << 16];
+        byte[] out = new byte[rawLen];
+        int off = 0;
         try {
-            while (!inf.finished()) {
-                int n = inf.inflate(tmp);
+            while (off < rawLen && !inf.finished()) {
+                int n = inf.inflate(out, off, rawLen - off);
                 if (n == 0) {
                     if (inf.finished() || inf.needsDictionary()) break;
                     if (inf.needsInput()) {
                         throw new QentimArtException("chunk " + hashHex + ": bad deflate data (truncated)", -1, "ECORRUPT");
                     }
                 }
-                out.write(tmp, 0, n);
+                off += n;
+            }
+            // 输出已填满 rawLen：若还能再产出字节，说明解压结果超过声明长度（炸弹 / 损坏）。
+            if (off == rawLen && !inf.finished() && inf.inflate(new byte[1]) > 0) {
+                throw new QentimArtException("chunk " + hashHex + ": inflated data exceeds declared length " + rawLen, -1, "ECORRUPT");
             }
         } catch (DataFormatException e) {
             throw new QentimArtException("chunk " + hashHex + ": bad deflate data: " + e.getMessage(), -1, "ECORRUPT");
         } finally {
             inf.end();
         }
-        return out.toByteArray();
+        // 产出不足时返回已得部分，交由上层的长度 / 哈希校验报 ECORRUPT。
+        return off == rawLen ? out : Arrays.copyOf(out, off);
     }
 
     public static Manifest parseManifest(byte[] gz) {
         Map<String, Object> doc;
         try {
-            doc = Json.parseObject(gunzip(gz));
+            doc = Json.parseObject(gunzip(gz, MAX_MANIFEST_RAW));
         } catch (Exception e) {
             throw new QentimArtException("invalid manifest: " + e.getMessage(), e);
         }
@@ -274,10 +302,26 @@ public final class Wire {
         }
     }
 
-    public static byte[] gunzip(byte[] gz) throws IOException {
+    public static byte[] gunzip(byte[] gz, long max) throws IOException {
         try (GZIPInputStream gis = new GZIPInputStream(new ByteArrayInputStream(gz))) {
-            return gis.readAllBytes();
+            return readCapped(gis, max, "manifest");
         }
+    }
+
+    /** 从流中最多读取 max 字节，超过即报错，防止恶意来源用超大响应体耗尽客户端内存。 */
+    public static byte[] readCapped(InputStream in, long max, String what) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        byte[] buf = new byte[1 << 16];
+        long total = 0;
+        int n;
+        while ((n = in.read(buf)) >= 0) {
+            total += n;
+            if (total > max) {
+                throw new QentimArtException(what + " exceeds size limit of " + max + " bytes", -1, "ETOOLARGE");
+            }
+            out.write(buf, 0, n);
+        }
+        return out.toByteArray();
     }
 
     private static String str(Object o) {

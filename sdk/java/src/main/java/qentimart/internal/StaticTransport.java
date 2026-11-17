@@ -2,6 +2,7 @@ package qentimart.internal;
 
 import qentimart.QentimArtException;
 
+import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -49,18 +50,24 @@ public final class StaticTransport implements AutoCloseable {
                 .build();
     }
 
-    public byte[] getBuffer(String rel, AtomicBoolean cancel) {
+    public byte[] getBuffer(String rel, long max, AtomicBoolean cancel) {
         Throwable last = null;
         for (int attempt = 0; attempt <= retries; attempt++) {
             if (cancel != null && cancel.get()) throw new QentimArtException("sync cancelled", -1, "ECANCELED");
             try {
                 HttpRequest req = HttpRequest.newBuilder(URI.create(origin + basePath + "/" + rel))
                         .timeout(timeout).GET().build();
-                HttpResponse<byte[]> resp = client.send(req, BodyHandlers.ofByteArray());
+                HttpResponse<InputStream> resp = client.send(req, BodyHandlers.ofInputStream());
                 if (resp.statusCode() >= 300) {
+                    try (InputStream in = resp.body()) {
+                        in.readNBytes(8192);
+                    }
                     throw new QentimArtException("GET " + rel + ": HTTP " + resp.statusCode(), resp.statusCode(), null);
                 }
-                return resp.body();
+                // 按 max 设上限读取，防止被攻陷的公开静态源用超大响应体耗尽客户端内存。
+                try (InputStream in = resp.body()) {
+                    return Wire.readCapped(in, max, "GET " + rel);
+                }
             } catch (QentimArtException e) {
                 if (e.status >= 0 && e.status < 500 && e.status != 429) throw e;
                 last = e;
@@ -78,7 +85,7 @@ public final class StaticTransport implements AutoCloseable {
         long now = System.currentTimeMillis();
         Map<String, Object> idx = index;
         if (idx != null && now - indexAt < 5000) return idx;
-        idx = (Map<String, Object>) Json.parse(getBuffer("index.json", cancel));
+        idx = (Map<String, Object>) Json.parse(getBuffer("index.json", Wire.MAX_JSON, cancel));
         index = idx;
         indexAt = now;
         return idx;
@@ -86,7 +93,7 @@ public final class StaticTransport implements AutoCloseable {
 
     public void fetchChunks(List<String> hashes, BiConsumer<String, byte[]> onChunk, Stats stats, AtomicBoolean cancel) {
         Pool.run(hashes, concurrency, h -> {
-            byte[] buf = getBuffer("chunks/" + h.substring(0, 2) + "/" + h, cancel);
+            byte[] buf = getBuffer("chunks/" + h.substring(0, 2) + "/" + h, Wire.MAX_BLOB_SIZE, cancel);
             byte[] raw = Wire.decodeBlob(h, buf);
             stats.downloadedWire.addAndGet(buf.length);
             stats.downloadedRaw.addAndGet(raw.length);
