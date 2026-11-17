@@ -1,15 +1,15 @@
 # @qentimart/sdk（Node.js）
 
-QentimArt 下游 SDK：把游戏素材目录同步到服务器上的任意版本。依赖为零，要求 Node.js ≥ 18。
+QentimArt 的 Node.js 下游客户端，用于将本地目录增量同步到指定素材版本。无第三方依赖，要求 Node.js ≥ 18。
 
-- 块级增量更新：只下载变化的块；文件移动、大文件局部修改时优先复用本地数据
-- 不保留本地对象缓存：稳态磁盘占用 ≈ 素材大小 + 极小的 `.qentimart/` 元数据（通常 < 0.1%）
-- 批量、多连接并行拉取，每个块都做 SHA-256 校验，文件原子替换
+- 按数据块增量同步，文件重命名、移动或大文件局部修改时直接复用本地已有数据
+- 本地不保留额外的块缓存库，除业务文件外只有 `.qentimart/` 状态文件（通常不到素材总大小的 0.1%）
+- 多连接批量并发拉取，落盘前逐块校验 SHA-256，写完临时文件后原子替换
 
 ## 安装
 
 ```bash
-npm install ./sdk/nodejs        # 或发布到私有 npm 仓库后 npm install @qentimart/sdk
+npm install ./sdk/nodejs        # 或发布到私有 npm 源后执行 npm install @qentimart/sdk
 ```
 
 ## 快速开始
@@ -20,7 +20,7 @@ import { QentimArtClient } from '@qentimart/sdk';
 const client = new QentimArtClient({
   server: 'http://assets.internal:8080',
   project: 'mygame',
-  token: process.env.QENTIMART_TOKEN, // 只读 token 即可
+  token: process.env.QENTIMART_TOKEN, // 只需 read 权限
 });
 
 const result = await client.sync('./assets', {
@@ -30,62 +30,71 @@ console.log(result.version, result.storage.ratio); // 例如 '1.2.0' 1.0004
 client.close();
 ```
 
-完整示例（检查更新 → 预估下载量 → 同步 → 处理冲突）见 [examples/plugin-example.mjs](examples/plugin-example.mjs)
+包含检查更新、预估下载量、同步及冲突处理的完整流程见 [examples/plugin-example.mjs](examples/plugin-example.mjs)
 
-聊天机器人插件（Yunzai-Bot V3 `apps/` 插件，参考 phi-plugin 用增量更新替代 `git pull` 拉"曲绘库"）见 [examples/plugin-illustration-update.js](examples/plugin-illustration-update.js)
+Yunzai-Bot V3 机器人插件接入示例（参考 phi-plugin，用增量同步替代 `git pull` 更新“曲绘库”）见 [examples/plugin-illustration-update.js](examples/plugin-illustration-update.js)
 
-## 静态模式（无需服务端）
+## 静态模式
 
-如果素材发布成了静态树并托管在对象存储 / CDN / Cloudflare Pages 上（见根目录 README 的静态模式），只需传 `baseUrl`，不需要 server/token，全程只读：
+如果上游通过 `qentimart publish --static` 把素材发布到了对象存储、CDN 或 Cloudflare Pages，初始化客户端时只需传入站点地址 `baseUrl`，无需配置 `server` 与 `token`：
 
 ```js
 const client = new QentimArtClient({ baseUrl: 'https://mygame.pages.dev' });
-await client.sync('./assets');                     // 和动态模式用法完全一致
+await client.sync('./assets');
 await client.sync('./assets', { version: '1.0.0' });
 ```
 
-`sync` / `plan` / `status` / `verify` / `diff` / `storageReport` 用法与动态模式相同
+`sync`、`plan`、`status`、`verify`、`diff`、`storageReport` 等方法均可照常调用
 
 ## API
 
 | 方法 | 说明 |
 |---|---|
-| `new QentimArtClient({ server, project, token, concurrency=8 })` | 创建动态客户端 |
-| `new QentimArtClient({ baseUrl, concurrency=8 })` | 创建静态客户端（只读，无需鉴权） |
-| `listVersions()` | 版本列表（新→旧）以及 `latest` |
-| `getVersion(v='latest', { prerelease })` | 版本元数据 |
-| `diff(from, to='latest')` | 服务端计算的版本差异 |
-| `sync(dir, opts)` | 同步到指定版本（默认 `latest`），可升级也可降级 |
-| `plan(dir, opts)` | 预演：会写入/删除哪些文件、预计下载多少 |
-| `status(dir)` | 离线检查：当前版本、被修改/缺失/多出的文件 |
-| `verify(dir)` | 重新计算所有文件的哈希，检测静默损坏 |
-| `QentimArtClient.storageReport(dir)` | `{ assetBytes, overheadBytes, ratio }` |
-| `close()` | 释放连接池 |
+| `new QentimArtClient({ server, project, token, concurrency=8 })` | 连接 `qentimart-server` 的客户端 |
+| `new QentimArtClient({ baseUrl, concurrency=8 })` | 连接静态托管源的只读客户端 |
+| `listVersions()` | 获取按新到旧排列的版本列表及 `latest` 指向 |
+| `getVersion(v='latest', { prerelease })` | 获取指定版本的元数据 |
+| `diff(from, to='latest')` | 查询两个版本之间的文件差异 |
+| `sync(dir, opts)` | 将本地目录同步到目标版本（默认 `latest`），支持任意升降级 |
+| `plan(dir, opts)` | 仅计算将要写入、删除的文件及预计下载字节数，不修改磁盘 |
+| `status(dir)` | 离线对比本地目录与上次同步清单，列出被改动、缺失和新增的文件 |
+| `verify(dir)` | 重算目录内全部受管文件的 SHA-256，排查文件损坏 |
+| `QentimArtClient.storageReport(dir)` | 统计磁盘占用：`{ assetBytes, overheadBytes, ratio }` |
+| `close()` | 关闭底层 HTTP 连接池 |
 
 ### `sync` 选项
 
-| 选项 | 默认 | 说明 |
+| 选项 | 默认值 | 说明 |
 |---|---|---|
-| `version` | `'latest'` | 目标版本，例如 `'1.0.0'` |
-| `localChanges` | `'overwrite'` | 本地被修改/新增的文件：`overwrite` 还原为服务器版本并删除多余文件；`keep` 保留它们、其余照常更新；`fail` 发现冲突就抛出 `SyncConflictError`，不做任何修改 |
-| `deleteUntrackedOnFirstSync` | `false` | 安全开关：目录从未同步过（没有 `.qentimart` 状态）时，即使是 `overwrite` 也不会删除不属于目标版本的文件，以防 `dir` 配错；设为 `true` 才删除 |
-| `prerelease` | `false` | 允许 `latest` 解析到预发布版本 |
-| `verifyAll` | `false` | 不信任 size+mtime，对所有本地文件计算哈希 |
-| `verifyPaths` | `[]` | 对指定的重要文件强制哈希校验（即使 size+mtime 未变），普通文件仍走快速检测。每项为相对路径，以 `/` 结尾表示目录前缀 |
-| `onProgress` | – | `({ phase, done, total, downloadedBytes, bytesPerSecond }) => void` |
-| `signal` | – | `AbortSignal`，用于取消 |
+| `version` | `'latest'` | 目标版本号，如 `'1.0.0'` |
+| `localChanges` | `'overwrite'` | 本地存在改动或多余文件时的行为：`overwrite` 覆盖还原并删除多余文件；`keep` 保留本地改动，只更新其余文件；`fail` 抛出 `SyncConflictError` 并中止，不写任何文件 |
+| `deleteUntrackedOnFirstSync` | `false` | 目录首次同步（尚无 `.qentimart` 记录）时默认不删目录里原有的其他文件，防止传错路径误删数据；设为 `true` 则首次同步也清理多余文件 |
+| `prerelease` | `false` | `version` 为 `'latest'` 时允许解析到预发布版本 |
+| `verifyAll` | `false` | 跳过 `size + mtime` 快速判断，对本地所有文件强制算哈希 |
+| `verifyPaths` | `[]` | 对列出的相对路径强制算哈希校验（以 `/` 结尾代表整个子目录），其余文件仍用 `size + mtime` 快速检查 |
+| `onProgress` | – | 进度回调 `({ phase, done, total, downloadedBytes, bytesPerSecond }) => void` |
+| `signal` | – | 用于中途取消同步的 `AbortSignal` |
 
 ## 命令行
 
 ```bash
 npx qentimart-node sync --server http://127.0.0.1:8080 --project mygame --token $TOKEN --dir ./assets
-npx qentimart-node plan    --dir ./assets --version 1.0.0
-npx qentimart-node status  --dir ./assets
-npx qentimart-node report  --dir ./assets
 ```
 
-## 性能调优
+```bash
+npx qentimart-node plan --dir ./assets --version 1.0.0
+```
 
-- `concurrency`：并行请求数，千兆内网 8 就够了，高延迟网络或 S3 后端可以调到 16–32
-- 需要大量解压时，可以调大 libuv 线程池：`UV_THREADPOOL_SIZE=16`
-- `waveBytes` / `waveFiles`：每轮最多同时打开的临时文件总大小和数量
+```bash
+npx qentimart-node status --dir ./assets
+```
+
+```bash
+npx qentimart-node report --dir ./assets
+```
+
+## 参数调优参考
+
+- `concurrency`：并发批次连接数，千兆内网保持默认的 8 即可；跨公网高延迟或后端为 S3 时可调高到 16–32
+- 解压数据量很大时，可适当调大 Node.js 的 libuv 线程池，例如设置环境变量 `UV_THREADPOOL_SIZE=16`
+- `waveBytes` / `waveFiles`：限制单轮同时打开的临时文件总体积与数量上限

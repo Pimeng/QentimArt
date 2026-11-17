@@ -1,153 +1,131 @@
-# QentimArt 安全审查报告
+# QentimArt 安全审查记录
 
-- 审查日期：2026-11-17
-- 范围：服务端（`internal/server`、`internal/storage`、`internal/wire`、`internal/manifest`、`internal/publish`）、CLI（`cmd/`）、Java 下游 SDK（`sdk/java`）
-- 方法：人工源码审计（无动态测试 / 无依赖 CVE 扫描）
+- 日期：2026-11-17
+- 范围：服务端（`internal/server`、`internal/storage`、`internal/wire`、`internal/manifest`、`internal/publish`）、命令行工具（`cmd/`）、Java SDK（`sdk/java`）
+- 方式：人工源码审计
 
-## 总体结论
+## 结论摘要
 
-整体架构在安全上有不少正确的设计：清单路径强校验（`manifest.ValidatePath`）、按哈希校验每个块、原子写入 + 符号链接逃逸防护（`Syncer.ensureParent`）、版本不可变、S3 SigV4 自实现签名、本地存储 key 的 `..` / 绝对路径拦截。
+原有实现已经覆盖了主要的路径与数据完整性边界：清单路径白名单校验（`manifest.ValidatePath`）、块级 SHA-256 校验、临时文件原子替换与符号链接父目录拦截（`Syncer.ensureParent`）、版本不可覆盖、本地存储路径防穿越，以及自实现的 S3 SigV4 签名。
 
-主要风险集中在**下游客户端（Java SDK）对“服务端 / 分发源返回的数据”缺乏大小上限**——在静态模式（从公开、无鉴权 URL 拉取）这一官方支持的部署形态下，一个被攻陷或恶意的分发源可以让客户端内存耗尽。服务端侧的问题相对次要，多为加固项。
+审查发现的主要隐患集中在 Java 客户端未限制远端响应与解压后的字节上限。在静态分发模式下，客户端直接拉取公开 URL，一旦分发源被篡改或遭遇中间人替换，恶意的压缩包或超大响应体会导致客户端内存耗尽（OOM）。服务端与 CLI 侧发现的几项问题风险较低，属于常规加固范畴。
 
-| # | 等级 | 问题 | 位置 |
-|---|------|------|------|
-| 1 | 中（静态模式下偏高）✅ 已修复 | Java SDK 解压无输出上限（deflate 炸弹） | `sdk/java/.../Wire.java` |
-| 2 | 中 ✅ 已修复 | Java SDK 对 manifest / 块响应体整体缓冲，无大小上限 | `Wire.java`, `HttpTransport.java`, `StaticTransport.java` |
-| 3 | 低~中 ✅ 已修复 | Bearer 令牌比较非恒定时间（时序侧信道） | `internal/server/server.go` |
-| 4 | 低 ✅ 已修复 | 未配置令牌时默认对所有人开放 admin | `internal/server/server.go`, `config.go` |
-| 5 | 低 ✅ 已修复 | S3 允许明文 HTTP + `UNSIGNED-PAYLOAD` | `internal/storage/s3.go` |
-| 6 | 低 ✅ 已修复 | 500 错误把内部错误原文回传客户端 | `internal/server/server.go` |
-| 7 | 低 ✅ 已修复 | CLI 用 `-token` 传令牌会泄漏到进程列表 | `cmd/qentimart/main.go` |
-| 8 | 低 ✅ 已修复 | Java `validatePath` 弱于 Go 版（控制字符 / Windows 保留名） | `Wire.java` |
-| 9 | 信息 ✅ 已修复 | 已鉴权请求可无限增长 `projects` map | `internal/server/project.go`, `config.go` |
+以下 9 项问题均已在 2026-11-17 完成修复并补充单测：
+
+| # | 等级 | 问题 | 涉及位置 | 状态 |
+|---|------|------|----------|------|
+| 1 | 中（静态模式偏高） | Java SDK 解压缺少输出字节上限（deflate 炸弹） | `sdk/java/.../Wire.java` | 已修复 |
+| 2 | 中 | Java SDK 读取清单与块响应体未设大小上限 | `Wire.java`, `HttpTransport.java`, `StaticTransport.java` | 已修复 |
+| 3 | 低~中 | Bearer 令牌直接用明文做 map 查找，非常量时间比较 | `internal/server/server.go` | 已修复 |
+| 4 | 低 | 未配置令牌时默认放行所有请求并赋予 admin 权限 | `internal/server/server.go`, `config.go` | 已修复 |
+| 5 | 低 | S3 存储允许非回环地址使用明文 HTTP | `internal/storage/s3.go` | 已修复 |
+| 6 | 低 | 500 响应直接把内部错误原文返回给客户端 | `internal/server/server.go` | 已修复 |
+| 7 | 低 | CLI 仅靠 `-token` 传参时令牌会暴露在系统进程列表中 | `cmd/qentimart/main.go` | 已修复 |
+| 8 | 低 | Java 端 `validatePath` 过滤规则比 Go 服务端宽松 | `Wire.java` | 已修复 |
+| 9 | 信息 | 持有通配权限的请求可令内存中的 `projects` 表无限增长 | `internal/server/project.go`, `config.go` | 已修复 |
 
 ---
 
-## 详细说明
+## 问题详情与修复记录
 
-> **状态：已修复（2026-11-17）。** `inflateRaw` 改为以 `rawLen` 为硬上限直接解压进固定缓冲，超出即报 `ECORRUPT`；`decodeChunk` / `readFrames` 在分配内存前校验 `rawLen`、`stored` 不超过 `MAX_CHUNK_SIZE`。
+### 1. Java SDK 解压缺少输出字节上限（中 / 静态模式偏高）
 
-### 1.（中 / 静态模式偏高）Java SDK 解压无输出上限 —— deflate 炸弹
-
-`sdk/java/src/main/java/qentimart/internal/Wire.java:102` `inflateRaw`：
+原 `sdk/java/src/main/java/qentimart/internal/Wire.java:102` 中的 `inflateRaw`：
 
 ```java
 ByteArrayOutputStream out = new ByteArrayOutputStream(Math.max(rawLenHint, 64));
 while (!inf.finished()) {
     int n = inf.inflate(tmp);
     ...
-    out.write(tmp, 0, n);      // 没有任何输出上限
+    out.write(tmp, 0, n);      // 未限制输出总字节数
 }
 ...
-// 长度/哈希校验发生在“完全解压之后”
+// 解压全部结束后才比对长度与哈希
 if (raw.length != rawLen || !sha256Hex(raw).equals(hashHex)) ...
 ```
 
-`rawLen` 只被当作初始缓冲区大小提示（hint），并未作为解压输出的硬上限；真正的长度校验在整段数据解压完成之后才执行。一个几 KB 的 deflate payload 可以膨胀到数 GB，直接把客户端打到 OOM。
+`rawLen` 仅用作缓冲区初始容量提示，长度检查推迟到了整段数据解压完毕之后。几 KB 的高压缩比 deflate 数据即可膨胀到数 GB，触发客户端 OOM。相比之下，Go 端 `internal/wire/wire.go:123` 先校验 `rawLen <= MaxChunkSize`（16 MiB），再按固定长度缓冲执行 `io.ReadFull`，不存在该问题。静态模式下客户端从无鉴权的公开站点拉取数据块，`rawLen` 和压缩流完全由远端控制，风险尤为直接。
 
-对比：Go 实现是安全的——`internal/wire/wire.go:123` 先 `make([]byte, rawLen)` 再 `io.ReadFull`，且 `rawLen` 在 `ReadFrameHeader` 里被限制为 `MaxChunkSize`（16 MiB）。Java 侧没有对等防护。
+**修复情况**：`decodeChunk` 与 `readFrames` 在分配缓冲前先校验 `rawLen` 和 `stored` 不超过 `MAX_CHUNK_SIZE`（16 MiB）；`inflateRaw` 改为以 `rawLen` 作为硬上限直接解压到定长数组，仍有剩余未解压数据时立即中止并报 `ECORRUPT`。
 
-**威胁模型为何成立**：静态模式（`StaticTransport`）按设计从**公开 baseUrl、无鉴权**拉取块对象（`StaticTransport.java:87` → `Wire.decodeBlob` → `inflateRaw`），`rawLen` 完全由分发源控制。被攻陷的 CDN / 对象存储 / 中间人即可触发。动态模式下若连接到恶意服务端亦然。
+### 2. Java SDK 对响应体无上限读入内存（中）
 
-**建议**：
-- 在 `inflateRaw` 中以 `rawLen`（且 `rawLen <= MaxChunkSize`，即 16 MiB）为硬上限；写入超过上限立即中止并报 `ECORRUPT`。
-- 解压前先校验 `rawLen <= 16 MiB`。
+- 块拉取：`StaticTransport.getBuffer` 与 `HttpTransport.buffer` 直接调用 `readAllBytes()` 读取完整响应体
+- 清单拉取：`HttpTransport.bufferResponse` 全量缓冲响应后再经 `Wire.gunzip`（内部同样调用 `GZIPInputStream.readAllBytes()`）解压，压缩态与解压态均无体积限制
 
-> **状态：已修复（2026-11-17）。** 新增 `Wire.readCapped`，所有远端响应体（块 blob、manifest gz、index.json / 版本目录 JSON、错误体）均按上限读取；`gunzip` 增加解压上限 `MAX_MANIFEST_RAW`；`bufferResponse`（原用 `ofByteArray` 无上限缓冲）替换为带上限的 `download`。
+Go 服务端解码清单时设有 `maxManifestBytes = 1<<30` 上限，而 Java 客户端缺少对应保护，异常或恶意的远端返回超大响应体或 gzip 炸弹时同样会导致 OOM。
 
-### 2.（中）Java SDK 对响应体整体缓冲，无大小上限
+**修复情况**：新增 `Wire.readCapped`，为块文件、压缩清单、`index.json`、版本列表 JSON 及错误响应体分别加上读取上限；`gunzip` 增加 `MAX_MANIFEST_RAW` 解压字节上限；原 `bufferResponse`（基于无上限的 `ofByteArray`）统一替换为带流式上限检查的下载逻辑。
 
-- 块下载：`StaticTransport.getBuffer` / `HttpTransport.buffer` 用 `readAllBytes()` 把整个响应读进内存，无上限。
-- manifest：`HttpTransport.bufferResponse` 读全量字节后 `Wire.gunzip`（`Wire.java:277`，`GZIPInputStream.readAllBytes()`）同样无上限。
+### 3. Bearer 令牌比较非常量时间（低~中）
 
-服务端对 manifest 解压有 `maxManifestBytes = 1<<30` 限制（`server.go:27`、`manifest.Decode` 的 `LimitReader`），但 **Java 客户端没有对等限制**。恶意 / 被攻陷的服务端或静态源可返回超大（或 gzip 炸弹）manifest，使客户端 OOM。
-
-**建议**：对下载的 wire blob 和 manifest（压缩态与解压态）都设置合理上限，超限即报错。与 #1 属同一类“客户端无条件信任远端数据体积”的问题。
-
-> **状态：已修复（2026-11-17）。** 令牌改为以 SHA-256 作为查表键（`tokenKey`），`New` 填表与 `allowed` 查表均先哈希，查表不再逐字节比较明文令牌，消除时序旁路。
-
-### 3.（低~中）Bearer 令牌比较非恒定时间
-
-`internal/server/server.go:113` `allowed`：
+原 `internal/server/server.go:113` 的鉴权逻辑：
 
 ```go
 if len(auth) <= len(prefix) || auth[:len(prefix)] != prefix { ... }
-t, ok := s.tokens[auth[len(prefix):]]   // map 查找，非恒定时间
+t, ok := s.tokens[auth[len(prefix):]]
 ```
 
-令牌直接作为 map key 查找，比较耗时与命中/未命中及前缀匹配长度相关，理论上可被远程时序分析逐步推断令牌。鉴于令牌随机且长度 ≥16，实际利用较难，但属标准加固项。
+直接拿明文 token 字符串作为 Go `map` 的键查找，比较耗时与前缀匹配程度有关，理论上存在时序侧信道。虽然 token 要求至少 16 字节随机字符、远程利用门槛较高，但改造成本很低。
 
-**建议**：对令牌做哈希（如 SHA-256）后再入表并比较，或用 `crypto/subtle.ConstantTimeCompare` 与候选集比对。
+**修复情况**：服务端初始化与鉴权查表时统一先对 token 计算 SHA-256（`tokenKey`），以定长哈希摘要作为键，避免逐字节比对明文令牌。
 
-> **状态：已修复（2026-11-17）。** 新增 `insecureNoAuth` 配置项；无令牌且未显式设为 `true` 时 `normalize` 直接拒绝启动（不再静默 fail-open）。
+### 4. 未配置令牌时默认放行全部 admin 权限（低）
 
-### 4.（低）未配置令牌时默认对所有人放行 admin
+原 `internal/server/server.go:67` 在配置中没有任何 token 时仅打印一行日志警告，随后对所有请求授予 `admin` 权限（允许发布、删版本和触发 GC）。漏配鉴权字段时默认全开权限风险偏高。
 
-`internal/server/server.go:67`：无令牌配置时打印 warning 并对**每个请求**授予 admin。虽有日志告警，但“fail-open”默认对于一个可写、可删除、可 GC 的资产仓库是危险默认值。
+**修复情况**：配置新增 `insecureNoAuth` 布尔字段；当 `tokens` 为空且未显式设置 `"insecureNoAuth": true` 时，`normalize` 直接报错拒绝启动。
 
-**建议**：至少提供显式开关（如 `insecureNoAuth: true`）才允许无令牌启动，否则拒绝启动。
+### 5. S3 存储允许非回环地址使用明文 HTTP（低）
 
-> **状态：已修复（2026-11-17）。** 新增 `allowInsecureHTTP` 配置项；endpoint 非 https 且非回环地址（localhost / 127.0.0.1）又未显式开启时，`NewS3` 直接拒绝创建。本地 MinIO 等回环地址仍可直接用 http。
+`internal/storage/s3.go:101` 发请求时请求体采用 `UNSIGNED-PAYLOAD`，若 `endpoint` 配成公网或跨网段的 `http://` 地址，对象内容既无传输层加密也无请求体签名校验，存在被窃听或中途篡改的风险。
 
-### 5.（低）S3 允许明文 HTTP + `UNSIGNED-PAYLOAD`
+**修复情况**：S3 配置新增 `allowInsecureHTTP` 开关；当 `endpoint` 为 `http://` 且目标主机不是本地回环地址（`localhost` / `127.0.0.1` / `::1`）时，未显式开启该开关会直接拒绝初始化。本机连 MinIO 调试仍可直接使用 HTTP。
 
-`internal/storage/s3.go:101` 对所有请求使用 `UNSIGNED-PAYLOAD`，且 `endpoint` 允许 `http://`。此时对象数据明文传输、且请求体不被签名保护，存在中间人窜改 / 窃听风险（凭据本身仍受 SigV4 头签名保护）。
+### 6. 500 错误把内部报错原文回传客户端（低）
 
-**建议**：生产环境强制 `https://`；或在使用 `http://` 时打印显式告警；视后端能力考虑对 PUT 签名真实 payload 哈希。
+原 `internal/server/server.go:134` 的 `writeErr` 在遇到非 `httpError` 时统一按 500 处理，并把 `err.Error()` 直接写进响应 JSON，可能将底层磁盘路径、S3 bucket 或内网 endpoint 暴露给调用方。
 
-> **状态：已修复（2026-11-17）。** `writeErr` 改为 `*Server` 方法；非 `httpError`（即 500）只把详情写日志，对外返回通用 `internal server error`。
+**修复情况**：`writeErr` 改为 `*Server` 方法，内部未知错误只把完整信息写入服务端日志，对外统一返回 `internal server error`。
 
-### 6.（低）500 错误回传内部错误原文
+### 7. CLI `-token` 参数暴露在进程列表中（低）
 
-`internal/server/server.go:134` `writeErr` 对非 `httpError` 一律按 500 处理并把 `err.Error()` 原文写入响应体。存储层错误可能包含 S3 endpoint、bucket、key、内部路径等信息，造成信息泄露。
+`cmd/qentimart/main.go:91` 支持通过 `-token` 命令行参数传入令牌。在多用户机器或共享构建机上，其他用户可通过 `ps` 或 `/proc` 看到命令行参数。虽然程序原本就支持 `QENTIMART_TOKEN` 环境变量，但缺少文件读取方式。
 
-**建议**：500 对外返回通用文案，详细错误只写服务端日志。
+**修复情况**：CLI 新增 `-token-file` 参数（优先级高于 `-token`），支持从受权限保护的文件读取令牌，并在 `-token` 的帮助说明中提示优先使用环境变量或文件。
 
-> **状态：已修复（2026-11-17）。** 新增 `-token-file` 选项（优先于 `-token`），从文件读取令牌避免其出现在进程列表；`-token` 帮助文案也提示优先用环境变量 / 文件。
+### 8. Java 端 `validatePath` 校验严密程度弱于 Go 端（低）
 
-### 7.（低）CLI `-token` 泄漏到进程列表
+原 `Wire.java:169` 的 `validatePath` 已经拦截了 `..`、`.`、空段、反斜杠、NUL、盘符、前导 `/` 和 `.qentimart` 目录，能够阻止目录穿越；但相比 Go 端 `manifest.ValidatePath`（`manifest.go:221`），少了路径总长限制、控制字符（`< 0x20`）、Windows 保留字符 `<>:"|?*`、Windows 保留设备名（`CON`、`NUL`、`AUX` 等）以及段尾空格或句点的拦截。作为客户端防范恶意清单的校验层，规则应与服务端严格对齐。
 
-`cmd/qentimart/main.go:91` 支持 `-token` 命令行传参。命令行参数在多数系统上对同机其他用户可见（`ps`、`/proc`）。已同时支持 `QENTIMART_TOKEN` 环境变量（较优）。
+**修复情况**：Java 端 `validatePath` 已补齐 1024 长度限制、控制字符拦截、Windows 非法字符与保留设备名检查，以及路径段末尾句点和空格的拒绝逻辑，与 Go 实现保持一致。
 
-**建议**：文档中优先推荐环境变量 / 配置文件；或支持从文件 / stdin 读取令牌。
+### 9. 通配令牌可令内存中的 `projects` 映射无上限增长（信息）
 
-> **状态：已修复（2026-11-17）。** Java `validatePath` 已与 Go `ValidatePath` 对齐：新增长度上限（1024）、段尾 `.`/空格 拦截、控制字符（< 0x20）与 Windows 保留字符 `\<>:"|?*` 拦截（盘符 `:` 亦被覆盖）。
+原 `internal/server/project.go:48` 的 `getProject` 对任何符合命名正则的项目名都会创建常驻内存的状态实例。持有 `projects: ["*"]` 令牌的调用方若不断请求随机项目名，会持续消耗服务端内存。
 
-### 8.（低）Java `validatePath` 弱于 Go 版
-
-`Wire.java:169` 的 `validatePath` 拦截了 `..`、`.`、空段、`\`、NUL、盘符、首段 `.qentimart`、绝对路径（首段为空），已能防住路径穿越。但相比 `manifest.ValidatePath`（Go，`manifest.go:221`）缺少：控制字符（NUL 以外）、Windows 保留字符 `<>:"|?*`、Windows 设备名（CON/NUL/AUX…）、段尾 `.`/空格 的拦截。
-
-在“对接合法服务端”场景下服务端已严格校验，但该客户端校验正是为“恶意服务端 / 静态源”准备的第二道防线，理应与服务端一致。非穿越漏洞，属健壮性。
-
-**建议**：使 Java 侧校验与 Go 侧 `ValidatePath` 对齐。
-
-> **状态：已修复（2026-11-17）。** 新增 `maxProjects` 配置项（默认 100000）；常驻项目数达上限后对新项目名返回 503，不再无界增长。
-
-### 9.（信息）已鉴权请求可无限增长 `projects` map
-
-`internal/server/project.go:48` `getProject` 对任意通过正则（`^[a-z0-9][a-z0-9._-]{0,63}$`）的项目名创建并常驻 map 条目。持有 `*` 范围令牌者可用大量不同项目名使 `s.projects` 无界增长（内存）。需有效令牌，影响有限。
-
-**建议**：如有需要，对项目数量设上限或做 LRU/淘汰。
+**修复情况**：配置新增 `maxProjects` 上限（默认 `100000`），内存中的项目数达到上限后对未知新项目名返回 503，不再继续分配。
 
 ---
 
-## 做得好的地方（供参考，勿回退）
+## 已有的安全边界
 
-- `manifest.ValidatePath`：严格的可移植相对路径校验，服务端提交时强制执行。
-- 每个块按 SHA-256 校验（上传、下载、本地复用三处均校验）。
-- `Syncer.ensureParent`：逐段创建父目录、`NOFOLLOW_LINKS`，防止通过已存在符号链接把文件写到 root 之外。
-- 本地存储 `Local.file`：拦截 `..`、前导 `/`、`\`。
-- 版本不可变（提交冲突返回 409），`meta.json` 最后写入作为提交完成标记。
-- 服务端对 manifest 上传 / 解压、fetch 块数、missing 请求数均设上限；`ReadHeaderTimeout` / `MaxHeaderBytes` 已设置。
-- 自实现 S3 SigV4 对 host、`x-amz-*`、date 正确签名。
-- 示例配置使用 `CHANGE-ME-*` 占位令牌，`.gitignore` 排除 `server.local.json`。
+以下机制在本次审查中确认实现合理，后续迭代需注意保持：
 
-## 优先处理建议
+- `manifest.ValidatePath` 在版本提交阶段强制校验跨平台相对路径合法性
+- 数据块在服务端入库、客户端下载、客户端本地旧文件复用三个环节均做 SHA-256 校验
+- `Syncer.ensureParent` 逐段创建目录并指定 `NOFOLLOW_LINKS`，防止利用本地预置符号链接将文件写到工作目录外
+- 本地磁盘存储 `Local.file` 拦截 `..`、前导 `/` 与反斜杠
+- 版本不可覆盖（冲突返回 409），且 `meta.json` 在所有校验通过后最后落盘
+- 服务端已对清单请求体与解压大小、单次 fetch 块数、单次 missing 哈希数，以及 HTTP `ReadHeaderTimeout` / `MaxHeaderBytes` 设置上限
+- S3 SigV4 实现正确覆盖了 `host`、`x-amz-*` 与时间头签名
+- 仓库中的示例配置仅含 `CHANGE-ME-*` 占位符，`server.local.json` 已列入 `.gitignore`
 
-全部 9 条均已修复（2026-11-17），并补充了针对性单元测试：
+## 回归测试与后续备注
 
-- Go：`internal/wire`（解压溢出 / 帧头上限）、`internal/server`（normalize 的无令牌拒绝与 maxProjects 默认值、鉴权拒绝、maxProjects 503）、`internal/storage`（S3 明文 http 策略）。
-- Java：`sdk/java/tests/WireHardening.java`（deflate 炸弹拒绝、rawLen 上限、`validatePath` 对齐），由 `tests/e2e.mjs` 运行。
+针对上述 9 项修复补充的自动化测试：
 
-后续仍可考虑（不属本次范围）：S3 对 http endpoint 仍为 `UNSIGNED-PAYLOAD`，如需请求体完整性可签名真实 payload 哈希。
+- Go 单元测试：覆盖 `internal/wire`（解压超限与帧头长度越界）、`internal/server`（空令牌拒绝启动、令牌哈希鉴权、`maxProjects` 触发 503）、`internal/storage`（S3 非回环明文 HTTP 拦截）
+- Java 测试：`sdk/java/tests/WireHardening.java`（deflate 炸弹拦截、`rawLen` 越界拒绝、`validatePath` 边界用例），已接入 `tests/e2e.mjs` 一并执行
+
+后续可选改进：当前 S3 请求在启用 `allowInsecureHTTP` 走明文内网时请求体仍为 `UNSIGNED-PAYLOAD`，如果未来有在不受信内网走非 TLS 对象存储的需求，可为 `PUT` 请求补上实际 payload 的 SHA-256 签名。
