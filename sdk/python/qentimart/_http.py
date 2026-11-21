@@ -9,6 +9,26 @@ from typing import Any, Callable, Dict, Optional, Tuple
 from urllib.parse import quote, urlsplit
 
 from ._errors import QentimArtError
+from ._wire import MAX_JSON, read_capped
+
+
+def source_url(url: str) -> str:
+    parsed = urlsplit(url)
+    host = parsed.hostname
+    if ":" in host:
+        host = "[" + host + "]"
+    if parsed.port is not None and parsed.port != (443 if parsed.scheme == "https" else 80):
+        host += ":%d" % parsed.port
+    return parsed.scheme + "://" + host + parsed.path.rstrip("/")
+
+
+def read_response(resp: http.client.HTTPResponse, limit: int) -> bytes:
+    if resp.length is not None and resp.length > limit:
+        raise QentimArtError("response exceeds %d bytes" % limit, code="ETOOBIG")
+    data = read_capped(resp, limit)
+    if resp.length:
+        raise QentimArtError("truncated HTTP response", code="ETRUNCATED")
+    return data
 
 
 class HttpClient:
@@ -75,7 +95,11 @@ class HttpClient:
             self.drop_conn()
             raise
         if resp.status >= 300:
-            data = resp.read()
+            try:
+                data = resp.read(64 << 10)
+            finally:
+                resp.close()
+                self.drop_conn()
             msg = data.decode("utf-8", "replace")
             try:
                 msg = json.loads(msg).get("error", msg)
@@ -84,14 +108,16 @@ class HttpClient:
             raise QentimArtError("%s %s: HTTP %d: %s" % (method, path, resp.status, msg), status=resp.status)
         return resp
 
-    def buffer(self, method: str, path: str, body: Optional[bytes] = None) -> Tuple[bytes, Any]:
+    def buffer(self, method: str, path: str, body: Optional[bytes] = None, limit: int = MAX_JSON) -> Tuple[bytes, Any]:
         def go(_attempt: int) -> Tuple[bytes, Any]:
             resp = self.request(method, path, body)
             try:
-                return resp.read(), resp.headers
+                return read_response(resp, limit), resp.headers
             except Exception:
                 self.drop_conn()
                 raise
+            finally:
+                resp.close()
 
         return self.with_retry(go)
 
@@ -108,7 +134,7 @@ class HttpClient:
             try:
                 return fn(attempt)
             except QentimArtError as e:
-                if (e.status is not None and e.status < 500) or e.code in ("ECANCELED", "ECONFLICT"):
+                if (e.status is not None and e.status < 500) or e.code in ("ECANCELED", "ECONFLICT", "ETOOBIG", "ECORRUPT"):
                     raise
                 last = e
             except (OSError, http.client.HTTPException) as e:

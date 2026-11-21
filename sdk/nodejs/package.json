@@ -1,6 +1,6 @@
 {
   "name": "@qentimart/sdk",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "QentimArt downstream SDK: pull game asset versions with chunk-level delta updates and no local object cache.",
   "repository": {
     "type": "git",
@@ -24,7 +24,7 @@
     "node": ">=18"
   },
   "scripts": {
-    "test": "node --test test/"
+    "test": "node --test"
   },
   "author": "Pimeng",
   "license": "MIT",

@@ -83,13 +83,15 @@ gzip 压缩的 UTF-8 JSON，`files` 按 `path` 字典序升序排列：
 ## 下游本地状态目录
 
 ```
-<asset dir>/.qentimart/state.json        {"formatVersion":1,"project","version","syncedAt","files":{path: mtimeMs}}
+<asset dir>/.qentimart/state.json        {"formatVersion":1,"project","source","version","syncedAt","files":{path: mtimeMs}}
 <asset dir>/.qentimart/manifest.json.gz  当前已同步版本的原始压缩清单，供本地块复用与离线 status 读取
 <asset dir>/.qentimart/tmp/              同步期间存放拼装中的临时文件，同步结束后清空
 <asset dir>/.qentimart/lock              并发同步互斥锁文件
 ```
 
 `mtimeMs` 存文件修改时间的整数毫秒值（向下取整）。Node.js、Python、Java 三个 SDK 读写的状态结构完全一致，可以在同一个目录上混用。
+
+`source` 标识发布源，取服务端或静态站点的协议、主机、非默认端口和去除末尾斜杠的路径，例如 `https://assets.example.org/game`。凭据、查询参数和片段均省略。只有来源、项目与版本均匹配时，才可直接使用本地缓存的目标清单。读取缺少 `source` 的旧状态时，首次同步重新获取目标清单，同时保留原有文件的跟踪信息。
 
 ### 锁与中断恢复
 

@@ -11,6 +11,7 @@ import java.net.http.HttpResponse;
 import java.net.http.HttpResponse.BodyHandlers;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -23,6 +24,17 @@ public final class HttpTransport implements AutoCloseable {
     private final Duration timeout;
     final int retries;
 
+    public static String sourceKey(String url) {
+        URI uri = URI.create(url);
+        String scheme = uri.getScheme().toLowerCase(Locale.ROOT);
+        String host = uri.getHost().toLowerCase(Locale.ROOT);
+        int port = uri.getPort();
+        String portPart = port < 0 || (port == 80 && scheme.equals("http")) || (port == 443 && scheme.equals("https"))
+                ? "" : ":" + port;
+        String path = uri.getRawPath();
+        return scheme + "://" + host + portPart + (path == null ? "" : path.replaceFirst("/++$", ""));
+    }
+
     public HttpTransport(String server, String project, String token, long timeoutMs, int retries) {
         URI u;
         try {
@@ -31,7 +43,7 @@ public final class HttpTransport implements AutoCloseable {
             throw new QentimArtException("invalid server URL " + server);
         }
         String scheme = u.getScheme();
-        if (scheme == null || !(scheme.equals("http") || scheme.equals("https")) || u.getHost() == null) {
+        if (scheme == null || !(scheme.equalsIgnoreCase("http") || scheme.equalsIgnoreCase("https")) || u.getHost() == null) {
             throw new QentimArtException("invalid server URL " + server);
         }
         String portPart = u.getPort() >= 0 ? ":" + u.getPort() : "";

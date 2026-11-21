@@ -10,13 +10,13 @@ from typing import Any, Callable, Dict, Optional
 from urllib.parse import quote
 
 from ._errors import QentimArtError, SyncConflictError
-from ._http import HttpClient
-from ._localfs import dir_bytes, hash_file, run_pool, scan_dir
+from ._http import HttpClient, source_url
+from ._localfs import asset_path, check_entry, dir_bytes, hash_file, run_pool, scan_dir
 from ._plan import PlanContext, build_plan, build_sources, estimate_download
 from ._state import TMP_DIR, acquire_lock, read_state, write_state
 from ._static import StaticTransport, version_from_index
 from ._sync import Stats, apply_writes, delete_files
-from ._wire import STATE_DIR, Manifest, decode_chunk, diff_manifests, iter_frames, parse_manifest
+from ._wire import MAX_MANIFEST_GZ, STATE_DIR, Manifest, decode_chunk, diff_manifests, iter_frames, parse_manifest
 
 ProgressFn = Callable[[Dict[str, Any]], None]
 
@@ -52,6 +52,7 @@ class QentimArtClient:
             self.mode = "api"
             self.project = project
             self._http = HttpClient(server, project, token, timeout, retries)
+        self._source = source_url(base_url or server)
 
     def close(self) -> None:
         if self._http is not None:
@@ -85,13 +86,19 @@ class QentimArtClient:
     def fetch_manifest_raw(self, version: str = "latest", prerelease: bool = False):
         if self.mode == "static":
             vi = self.get_version(version, prerelease)
-            return vi["version"], self._static.get_buffer("versions/%s/manifest.json.gz" % vi["version"])
+            return vi["version"], self._static.get_buffer("versions/%s/manifest.json.gz" % vi["version"], limit=MAX_MANIFEST_GZ)
         body, headers = self._http.buffer(
-            "GET", "/versions/%s/manifest%s" % (quote(version, safe=""), "?prerelease=1" if prerelease else ""))
+            "GET", "/versions/%s/manifest%s" % (quote(version, safe=""), "?prerelease=1" if prerelease else ""),
+            limit=MAX_MANIFEST_GZ)
         return headers.get("X-QentimArt-Version"), body
 
     def fetch_manifest(self, version: str = "latest", prerelease: bool = False) -> Manifest:
-        return parse_manifest(self.fetch_manifest_raw(version, prerelease)[1])
+        resolved, gz = self.fetch_manifest_raw(version, prerelease)
+        manifest = parse_manifest(gz)
+        if ((version != "latest" and manifest.version != version)
+                or (resolved is not None and manifest.version != resolved)):
+            raise QentimArtError("manifest version mismatch", code="ECORRUPT")
+        return manifest
 
     def fetch_chunks(self, hashes, size_of, on_chunk, stats, cancel) -> None:
         """取一批块，每块解码校验后回调 on_chunk(hash, raw)。动态批量 / 静态逐块。"""
@@ -133,6 +140,7 @@ class QentimArtClient:
                     pending.discard(h)
                 ok = True
             finally:
+                resp.close()
                 if not ok:
                     http.drop_conn()
             if pending:
@@ -186,16 +194,20 @@ class QentimArtClient:
         release = (lambda: None) if dry_run else acquire_lock(root)
         try:
             state, old_manifest, old_gz = read_state(root)
-            same_project = state is not None and state.get("project") == self.project
+            same_project = (state is not None and old_manifest is not None and state.get("project") == self.project
+                            and state.get("source") in (None, self._source))
 
             progress("resolve", 0, 1, True)
             if version == "latest":
                 version = self.get_version("latest", prerelease)["version"]
-            if same_project and old_manifest is not None and old_manifest.version == version:
+            if same_project and state.get("source") == self._source and old_manifest.version == version:
                 target_gz = old_gz
+                target = old_manifest
             else:
                 target_gz = self.fetch_manifest_raw(version)[1]
-            target = parse_manifest(target_gz)
+                target = parse_manifest(target_gz)
+            if target.version != version:
+                raise QentimArtError("manifest version mismatch", code="ECORRUPT")
 
             progress("scan", 0, 1, True)
             files, dirs = scan_dir(root)
@@ -216,7 +228,7 @@ class QentimArtClient:
                 has_state=bool(same_project and old_manifest is not None), progress=progress,
                 verify_wanted=verify_wanted)
             plan = build_plan(ctx, target)
-            if plan.conflicts and local_changes == "fail":
+            if plan.conflicts:
                 raise SyncConflictError(plan.conflicts)
 
             sources = build_sources(ctx, target, plan)
@@ -247,17 +259,22 @@ class QentimArtClient:
                 result["elapsed_ms"] = int((time.time() - started) * 1000)
                 return result
 
+            tmp_dir = os.path.join(root, STATE_DIR, TMP_DIR)
+            check_entry(tmp_dir, directory=True)
             new_tracked = plan.new_tracked
             if plan.to_write:
-                apply_writes(self, root, local_changes, plan, sources, stats, new_tracked, write_bytes, progress, cancel_event)
+                apply_writes(self, root, plan, sources, stats, new_tracked, write_bytes, progress, cancel_event)
 
             progress("cleanup", 0, len(plan.to_delete), True)
             delete_files(root, plan.to_delete)
-            shutil.rmtree(os.path.join(root, STATE_DIR, TMP_DIR), ignore_errors=True)
+            check_entry(tmp_dir, directory=True)
+            if os.path.isdir(tmp_dir):
+                shutil.rmtree(tmp_dir)
 
             new_state = {
                 "formatVersion": 1,
                 "project": self.project,
+                "source": self._source,
                 "version": version,
                 "syncedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
                 "files": new_tracked,
@@ -285,7 +302,8 @@ class QentimArtClient:
         """相对上次同步版本的本地改动（不访问网络）。"""
         root = os.path.abspath(dir)
         state, manifest, _ = read_state(root)
-        if state is None or manifest is None or state.get("project") != self.project:
+        if (state is None or manifest is None or state.get("project") != self.project
+                or state.get("source") not in (None, self._source)):
             return {"synced": False, "project": state.get("project") if state else None, "version": None,
                     "modified": [], "missing": [], "untracked": []}
         files, _dirs = scan_dir(root)
@@ -302,7 +320,7 @@ class QentimArtClient:
         lock = threading.Lock()
 
         def check(f) -> None:
-            if hash_file(os.path.join(root, f.path)) != f.hash:
+            if hash_file(asset_path(root, f.path)) != f.hash:
                 with lock:
                     modified.append(f.path)
 
@@ -325,8 +343,8 @@ class QentimArtClient:
 
         def check(f) -> None:
             try:
-                ok = hash_file(os.path.join(root, f.path)) == f.hash
-            except OSError:
+                ok = hash_file(asset_path(root, f.path)) == f.hash
+            except (OSError, QentimArtError):
                 ok = False
             with lock:
                 if not ok:
@@ -345,5 +363,7 @@ class QentimArtClient:
         root = os.path.abspath(dir)
         files, _ = scan_dir(root)
         asset = sum(f.size for f in files.values())
-        overhead = dir_bytes(os.path.join(root, STATE_DIR))
+        state_dir = os.path.join(root, STATE_DIR)
+        check_entry(state_dir, directory=True)
+        overhead = dir_bytes(state_dir)
         return {"asset_bytes": asset, "overhead_bytes": overhead, "ratio": (asset + overhead) / asset if asset else 1.0}

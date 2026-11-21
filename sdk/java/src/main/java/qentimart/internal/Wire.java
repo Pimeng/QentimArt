@@ -12,17 +12,20 @@ import java.io.DataInputStream;
 import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Pattern;
 import java.util.zip.DataFormatException;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.Inflater;
@@ -51,6 +54,12 @@ public final class Wire {
     public static final long MAX_MANIFEST_RAW = 1L << 30;
     /** JSON 响应（版本目录 / index.json）下载上限。 */
     public static final int MAX_JSON = 64 << 20;
+    private static final Pattern HASH = Pattern.compile("[0-9a-f]{64}");
+    private static final Pattern VERSION = Pattern.compile("[0-9]+\\.[0-9]+\\.[0-9]+(?:-[a-zA-Z0-9-]++(?:\\.[a-zA-Z0-9-]++)*+)?");
+    private static final Pattern DEVICE = Pattern.compile(
+            "(?i)(CON|PRN|AUX|NUL|CONIN\\$|CONOUT\\$|(?:COM|LPT)[1-9¹²³]) *");
+    private static final char[] HEXD = "0123456789abcdef".toCharArray();
+    private static final String EMPTY_HASH = sha256Hex(new byte[0]);
 
     /** 帧回调。 */
     public interface FrameSink {
@@ -153,51 +162,89 @@ public final class Wire {
     }
 
     public static Manifest parseManifest(byte[] gz) {
+        if (gz.length > MAX_MANIFEST_GZ) throw new QentimArtException("compressed manifest exceeds size limit", -1, "ETOOLARGE");
         Map<String, Object> doc;
         try {
             doc = Json.parseObject(gunzip(gz, MAX_MANIFEST_RAW));
         } catch (Exception e) {
             throw new QentimArtException("invalid manifest: " + e.getMessage(), e);
         }
+        if (doc == null) throw new QentimArtException("invalid manifest");
         Object fv = doc.get("formatVersion");
         if (!(fv instanceof Long) || (Long) fv != 1L) {
             throw new QentimArtException("unsupported manifest formatVersion " + fv);
         }
+        String version = validateVersion(doc.get("version"));
+        if (!(doc.get("files") instanceof List<?> entries)) throw new QentimArtException("manifest: expected files array");
         LinkedHashMap<String, ManifestFile> files = new LinkedHashMap<>();
-        Object rawFiles = doc.get("files");
-        if (rawFiles instanceof List) {
-            for (Object o : (List<?>) rawFiles) {
-                Map<?, ?> f = (Map<?, ?>) o;
-                String path = (String) f.get("path");
-                long size = ((Number) f.get("size")).longValue();
-                String fh = (String) f.get("hash");
-                validatePath(path);
-                List<Chunk> chunks = new ArrayList<>();
-                Object rc = f.get("chunks");
-                if (rc instanceof List && !((List<?>) rc).isEmpty()) {
-                    long off = 0;
-                    for (Object c : (List<?>) rc) {
-                        List<?> pair = (List<?>) c;
-                        String h = (String) pair.get(0);
-                        long sz = ((Number) pair.get(1)).longValue();
-                        chunks.add(new Chunk(h, sz, off));
-                        off += sz;
-                    }
-                    if (off != size) {
-                        throw new QentimArtException("manifest: chunk sizes of " + path + " do not add up");
-                    }
-                } else if (size > 0) {
-                    chunks.add(new Chunk(fh, size, 0));
-                }
-                files.put(path, new ManifestFile(path, size, fh, chunks));
+        Set<String> paths = new HashSet<>();
+        Set<String> dirs = new HashSet<>();
+        Map<String, Long> chunkSizes = new HashMap<>();
+        for (Object entry : entries) {
+            if (!(entry instanceof Map<?, ?> f) || !(f.get("path") instanceof String path)
+                    || !(f.get("size") instanceof Long size) || size < 0) {
+                throw new QentimArtException("manifest: invalid file entry");
             }
+            validatePath(path);
+            String key = path.toLowerCase(Locale.ROOT);
+            if (!paths.add(key) || dirs.contains(key)) throw new QentimArtException("manifest: conflicting path " + path);
+            for (int slash = key.indexOf('/'); slash >= 0; slash = key.indexOf('/', slash + 1)) {
+                String parent = key.substring(0, slash);
+                if (paths.contains(parent)) throw new QentimArtException("manifest: file used as directory in " + path);
+                dirs.add(parent);
+            }
+
+            String hash = manifestHash(f.get("hash"));
+            List<Chunk> chunks = new ArrayList<>();
+            Object refs = f.get("chunks");
+            if (refs != null && !(refs instanceof List)) throw new QentimArtException("manifest: invalid chunks for " + path);
+            if (refs instanceof List<?> pairs && !pairs.isEmpty()) {
+                long off = 0;
+                for (Object ref : pairs) {
+                    if (!(ref instanceof List<?> pair) || pair.size() != 2 || !(pair.get(1) instanceof Long n)
+                            || n <= 0 || n > MAX_CHUNK_SIZE || n > size - off) {
+                        throw new QentimArtException("manifest: invalid chunk reference in " + path);
+                    }
+                    chunks.add(new Chunk(manifestHash(pair.get(0)), n, off));
+                    off += n;
+                }
+                if (off != size) throw new QentimArtException("manifest: chunk sizes of " + path + " do not add up");
+            } else if (size > 0 && size <= MAX_CHUNK_SIZE) {
+                chunks.add(new Chunk(hash, size, 0));
+            } else if (size != 0 || !hash.equals(EMPTY_HASH)) {
+                throw new QentimArtException("manifest: invalid implied chunk for " + path);
+            }
+            if (chunks.size() == 1 && !chunks.get(0).hash().equals(hash)) {
+                throw new QentimArtException("manifest: file and single chunk hashes differ for " + path);
+            }
+            for (Chunk chunk : chunks) {
+                Long previous = chunkSizes.putIfAbsent(chunk.hash(), chunk.size());
+                if (previous != null && previous != chunk.size()) throw new QentimArtException("manifest: conflicting chunk sizes");
+            }
+            files.put(path, new ManifestFile(path, size, hash, chunks));
         }
-        return new Manifest(str(doc.get("version")), str(doc.get("createdAt")), files);
+        return new Manifest(version, str(doc.get("createdAt")), files);
+    }
+
+    private static String manifestHash(Object value) {
+        if (!(value instanceof String s) || !HASH.matcher(s).matches()) {
+            throw new QentimArtException("manifest: invalid SHA-256 digest");
+        }
+        return s;
+    }
+
+    /** A concrete version from the catalog must be a single portable URL path component. */
+    public static String validateVersion(Object value) {
+        if (!(value instanceof String s) || !VERSION.matcher(s).matches()) {
+            throw new QentimArtException("invalid version in response");
+        }
+        return s;
     }
 
     /** 校验路径为可移植的相对路径（规则与服务端 manifest.ValidatePath 保持一致）。 */
     public static void validatePath(String p) {
-        if (p == null || p.isEmpty() || p.length() > 1024) {
+        if (p == null || p.isEmpty() || p.length() > 1024 || p.getBytes(StandardCharsets.UTF_8).length > 1024
+                || p.codePoints().anyMatch(cp -> cp >= Character.MIN_SURROGATE && cp <= Character.MAX_SURROGATE)) {
             throw new QentimArtException("unsafe path " + p);
         }
         String[] segs = p.split("/", -1);
@@ -212,6 +259,9 @@ public final class Wire {
             if (s.endsWith(".") || s.endsWith(" ")) {
                 throw new QentimArtException("path not portable to Windows (segment ends with '.' or ' '): " + p);
             }
+            int dot = s.indexOf('.');
+            String stem = dot < 0 ? s : s.substring(0, dot);
+            if (DEVICE.matcher(stem).matches()) throw new QentimArtException("reserved device name in path " + p);
             // 控制字符与 Windows 保留字符（含 '\\' 与盘符 ':'）。
             for (int i = 0; i < s.length(); i++) {
                 char c = s.charAt(i);
@@ -271,8 +321,6 @@ public final class Wire {
                 | ((long) (b[off + 2] & 0xFF) << 8)
                 | (b[off + 3] & 0xFF);
     }
-
-    private static final char[] HEXD = "0123456789abcdef".toCharArray();
 
     public static String hex(byte[] b, int off, int len) {
         char[] c = new char[len * 2];

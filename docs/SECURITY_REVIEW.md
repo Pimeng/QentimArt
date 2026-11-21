@@ -1,5 +1,25 @@
 # QentimArt 安全审查记录
 
+## 2026-11-22 项目复查
+
+覆盖 Go 服务端、CLI、本地和 S3 存储，以及 Node.js、Python、Java SDK 的动态和静态同步。
+
+| 修复范围 | 结果 |
+|---|---|
+| 鉴权和部署 | 私有制品响应使用 `private, no-store`。服务端拒绝示例令牌与重复令牌，示例部署默认绑定回环地址。 |
+| 存储和并发 | 本地后端通过 Go 的 `os.Root` 约束对象访问范围。版本列表使用独立快照，避免发布或删除与查询并发时读写同一张表。发布客户端限制跨源重定向，S3 客户端禁用重定向。 |
+| 数据校验 | 对响应体、压缩数据和单块解压设置字节上限，校验清单路径、版本、哈希和块大小。三个 SDK 在安装多块文件前核对完整文件的 SHA-256。 |
+| 本地同步 | 校验状态目录和目标路径，限制清理范围。文件与目录互换时保留未授权删除的本地文件，来源不同的同版本清单分别处理。 |
+| 构建工具链 | Go 编译基线升至 1.27.4，Docker 运行镜像升至 Alpine 3.24，Java Gradle Wrapper 升至 9.9.2 并固定发行包 SHA-256。Go 1.27.4 的 `govulncheck` 复扫未发现漏洞。 |
+
+[Go 发布版本](https://go.dev/dl/) · [Gradle 安全公告](https://github.com/gradle/gradle/security/advisories) · [Gradle 官方校验和](https://gradle.org/release-checksums/)
+
+旧版曾通过 CDN 提供私有资源的部署，升级时需清理历史缓存并让受保护的 API 路径回源鉴权。详见 [CDN 缓存配置](CDN_CACHE.md#动态模式qentimart-server)。
+
+SDK 路径检查覆盖预置链接。允许其他本地进程同时写入素材目录时，路径检查与文件操作之间仍存在竞态。静态发布应由可信来源通过 HTTPS 提供。
+
+## 2026-11-17 初次审查
+
 - 日期：2026-11-17
 - 范围：服务端（`internal/server`、`internal/storage`、`internal/wire`、`internal/manifest`、`internal/publish`）、命令行工具（`cmd/`）、Java SDK（`sdk/java`）
 - 方式：人工源码审计

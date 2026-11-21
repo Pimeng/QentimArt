@@ -1,11 +1,10 @@
 """将本地目录与目标 manifest 进行比较。"""
 from __future__ import annotations
 
-import os
 import threading
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Set
 
-from ._localfs import LocalFile, hash_file, run_pool
+from ._localfs import LocalFile, asset_path, hash_file, run_pool
 from ._wire import Chunk, Manifest, ManifestFile
 
 
@@ -92,7 +91,7 @@ def build_plan(ctx: PlanContext, target: Manifest) -> Plan:
 
     def do_hash(item) -> None:
         t, l = item
-        h = hash_file(os.path.join(ctx.root, t.path))
+        h = hash_file(asset_path(ctx.root, t.path))
         with lock:
             done[0] += l.size
             if h == t.hash:
@@ -114,8 +113,8 @@ def build_plan(ctx: PlanContext, target: Manifest) -> Plan:
         if is_clean(p, l):
             plan.to_delete.append(p)
             continue
-        # 该文件是否属于 SDK 受管范围：曾记录在状态里，或存在于旧清单中。
-        managed = p in ctx.tracked or p in old
+        # 受管范围来自已验证的旧清单；state.json 的 mtime 只用于快速检测。
+        managed = p in old
         if policy == "overwrite":
             if managed:
                 # 受管但本地有改动：overwrite 语义为「以服务端为准还原」，服务端已无此文件 → 删除。
@@ -130,7 +129,28 @@ def build_plan(ctx: PlanContext, target: Manifest) -> Plan:
         else:
             plan.conflicts.append(p)
 
-    plan.to_write.sort(key=lambda w: w.t.path)
+    # 路径结构转换也必须遵守对未跟踪文件的保留策略。
+    kept = set(plan.kept)
+    kept_parents = set()
+    for p in kept:
+        parent = p.rpartition("/")[0]
+        while parent and parent not in kept_parents:
+            kept_parents.add(parent)
+            parent = parent.rpartition("/")[0]
+    writes = []
+    for w in plan.to_write:
+        p = w.t.path
+        parent = p.rpartition("/")[0]
+        while parent and parent not in kept:
+            parent = parent.rpartition("/")[0]
+        if parent or p in kept_parents:
+            if policy == "keep":
+                plan.kept.append(p)
+            else:
+                plan.conflicts.append(parent or p)
+        else:
+            writes.append(w)
+    plan.to_write = sorted(writes, key=lambda w: w.t.path)
     plan.to_delete.sort()
     plan.kept.sort()
     plan.conflicts.sort()

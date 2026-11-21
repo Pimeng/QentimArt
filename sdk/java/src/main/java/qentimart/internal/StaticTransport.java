@@ -33,7 +33,7 @@ public final class StaticTransport implements AutoCloseable {
             throw new QentimArtException("invalid baseUrl " + baseUrl);
         }
         String scheme = u.getScheme();
-        if (scheme == null || !(scheme.equals("http") || scheme.equals("https")) || u.getHost() == null) {
+        if (scheme == null || !(scheme.equalsIgnoreCase("http") || scheme.equalsIgnoreCase("https")) || u.getHost() == null) {
             throw new QentimArtException("invalid baseUrl " + baseUrl);
         }
         String portPart = u.getPort() >= 0 ? ":" + u.getPort() : "";

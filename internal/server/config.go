@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"qentimart/internal/storage"
@@ -60,6 +61,9 @@ func LoadConfig(path string) (Config, error) {
 	if err := json.Unmarshal(b, &c); err != nil {
 		return c, fmt.Errorf("config %s: %w", path, err)
 	}
+	if err := c.normalize(); err != nil {
+		return c, fmt.Errorf("config %s: %w", path, err)
+	}
 	return c, nil
 }
 
@@ -102,13 +106,21 @@ func (c *Config) normalize() error {
 	if len(c.Tokens) == 0 && !c.InsecureNoAuth {
 		return errors.New(`no tokens configured; add at least one token, or set "insecureNoAuth": true to explicitly allow unauthenticated admin access`)
 	}
+	seen := make(map[string]struct{}, len(c.Tokens))
 	for _, t := range c.Tokens {
+		if strings.HasPrefix(t.Token, "CHANGE-ME-") {
+			return fmt.Errorf("token %q: replace the example placeholder using gen-token", t.Name)
+		}
 		if len(t.Token) < 16 {
 			return fmt.Errorf("token %q: must be at least 16 characters", t.Name)
 		}
 		if roleLevel(t.Role) == 0 {
 			return fmt.Errorf("token %q: invalid role %q", t.Name, t.Role)
 		}
+		if _, exists := seen[t.Token]; exists {
+			return fmt.Errorf("token %q: duplicate credential", t.Name)
+		}
+		seen[t.Token] = struct{}{}
 	}
 	return nil
 }

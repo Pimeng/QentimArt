@@ -87,7 +87,11 @@ public class E2EClient {
             check(r.files.kept.size() == 2 && keptOk, "localChanges='keep' preserves local edits");
 
             c.sync(dest);
-            check(tree(Paths.get(dest)).equals(tree2), "localChanges='overwrite' (default) restores 1.1.0 and removes extra files");
+            check(Files.readString(Paths.get(dest).resolve("ui/untracked-by-user.txt")).equals("mine")
+                            && tree2.get(victim).equals(tree(Paths.get(dest)).get(victim)),
+                    "default overwrite restores managed files and preserves untracked files");
+            c.sync(dest, new SyncOptions().deleteUntracked(true));
+            check(tree(Paths.get(dest)).equals(tree2), "deleteUntracked removes extra files on an established sync");
 
             r = c.sync(dest, new SyncOptions().version("1.0.0"));
             check(tree(Paths.get(dest)).equals(tree1),
@@ -107,6 +111,24 @@ public class E2EClient {
             check(Files.exists(Paths.get(wrong).resolve("important/user-file.doc"))
                             && r.files.kept.contains("important/user-file.doc"),
                     "first sync never deletes unknown files (deleteUntrackedOnFirstSync=false)");
+
+            Path shape = Paths.get(dest + "-shape");
+            deleteTree(shape);
+            Path protectedFile = shape.resolve(victim).resolve("local-note.txt");
+            Files.createDirectories(protectedFile.getParent());
+            Files.writeString(protectedFile, "local");
+            boolean shapeConflict = false;
+            try {
+                c.plan(shape.toString(), new SyncOptions().version("1.1.0"));
+            } catch (SyncConflictException expected) {
+                shapeConflict = expected.conflicts.contains(victim);
+            }
+            check(shapeConflict && Files.readString(protectedFile).equals("local"),
+                    "a local child blocks directory-to-file replacement during planning");
+            SyncResult shapePlan = c.plan(shape.toString(), new SyncOptions().version("1.1.0")
+                    .deleteUntracked(true).deleteUntrackedOnFirstSync(true));
+            check(shapePlan.paths.write.contains(victim) && shapePlan.paths.delete.contains(victim + "/local-note.txt"),
+                    "explicit first-sync deletion authorizes a directory-to-file replacement");
 
             // --- 可靠性 ---
             String lockDir = dest + "-rel";

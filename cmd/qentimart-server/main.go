@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"syscall"
 	"time"
 
 	"qentimart/internal/server"
@@ -39,7 +40,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, usage, version)
 		os.Exit(2)
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	var err error
 	switch os.Args[1] {
@@ -79,6 +80,7 @@ func cmdServe(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	defer store.Close()
 	logger := log.New(os.Stderr, "", log.LstdFlags|log.Lmicroseconds)
 	srv, err := server.New(cfg, store, logger)
 	if err != nil {
@@ -91,17 +93,24 @@ func cmdServe(ctx context.Context, args []string) error {
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    1 << 16,
 	}
-	go func() {
-		<-ctx.Done()
+	serveErr := make(chan error, 1)
+	logger.Printf("qentimart-server %s listening on %s (storage: %s)", version, cfg.Listen, storageDesc(cfg.Storage))
+	go func() { serveErr <- hs.ListenAndServe() }()
+	select {
+	case err := <-serveErr:
+		if !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+		return nil
+	case <-ctx.Done():
 		sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		hs.Shutdown(sctx)
-	}()
-	logger.Printf("qentimart-server %s listening on %s (storage: %s)", version, cfg.Listen, storageDesc(cfg.Storage))
-	if err := hs.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return err
+		if err := hs.Shutdown(sctx); err != nil {
+			hs.Close()
+			return err
+		}
+		return nil
 	}
-	return nil
 }
 
 func storageDesc(c storage.Config) string {

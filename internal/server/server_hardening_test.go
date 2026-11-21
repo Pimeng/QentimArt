@@ -5,10 +5,13 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 
+	"qentimart/internal/publish"
 	"qentimart/internal/server"
 	"qentimart/internal/storage"
+	"qentimart/internal/wire"
 )
 
 func getStatus(t *testing.T, url, token string) int {
@@ -52,6 +55,7 @@ func TestMaxProjectsCap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { store.Close() })
 	cfg := server.Config{
 		Tokens:      []server.TokenConfig{{Token: adminTok, Role: "admin", Projects: []string{"*"}}},
 		MaxProjects: 1,
@@ -73,5 +77,44 @@ func TestMaxProjectsCap(t *testing.T) {
 	}
 	if c := getStatus(t, url("beta"), adminTok); c != http.StatusServiceUnavailable {
 		t.Fatalf("second distinct project: got %d want 503", c)
+	}
+}
+
+func TestArtifactCacheHonorsReadAccess(t *testing.T) {
+	store, err := storage.NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	src := t.TempDir()
+	content := []byte("cache fixture")
+	writeFile(t, filepath.Join(src, "asset"), content)
+	cfg := server.Config{Tokens: []server.TokenConfig{{Token: pubTok, Role: "publish", Projects: []string{"game"}}}}
+	for _, anonymous := range []bool{false, true} {
+		cfg.AllowAnonymousRead = anonymous
+		srv, err := server.New(cfg, store, log.New(io.Discard, "", 0))
+		if err != nil {
+			t.Fatal(err)
+		}
+		ts := httptest.NewServer(srv.Handler())
+		t.Cleanup(ts.Close)
+		c := publish.NewClient(ts.URL, "game", pubTok, 1)
+		want := "private, no-store"
+		if anonymous {
+			c.Token = ""
+			want = "public, max-age=31536000, immutable"
+		} else if _, err := publish.Run(t.Context(), c, publish.Options{Dir: src, Version: "1.0.0"}); err != nil {
+			t.Fatal(err)
+		}
+		for _, endpoint := range []string{"/versions/1.0.0/manifest", "/chunks/" + wire.Sum(content).String()} {
+			resp, err := c.Do(t.Context(), "GET", endpoint, nil, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+			if got := resp.Header.Get("Cache-Control"); got != want {
+				t.Errorf("%s anonymous=%v: got %q want %q", endpoint, anonymous, got, want)
+			}
+		}
 	}
 }

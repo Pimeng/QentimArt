@@ -3,7 +3,6 @@ package storage
 import (
 	"context"
 	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"io"
 	"io/fs"
@@ -15,38 +14,42 @@ import (
 
 // Local 把对象以文件形式存储在根目录下。
 type Local struct {
-	root string
-	tmp  string
+	root *os.Root
 }
 
 // NewLocal 创建（如有必要）并打开本地后端。
 func NewLocal(root string) (*Local, error) {
-	abs, err := filepath.Abs(root)
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return nil, err
+	}
+	dir, err := os.OpenRoot(root)
 	if err != nil {
 		return nil, err
 	}
-	tmp := filepath.Join(abs, ".tmp")
-	if err := os.MkdirAll(tmp, 0o755); err != nil {
+	if err := dir.MkdirAll(".tmp", 0o700); err != nil {
+		dir.Close()
 		return nil, err
 	}
-	return &Local{root: abs, tmp: tmp}, nil
+	return &Local{root: dir}, nil
 }
 
-func (l *Local) file(key string) (string, error) {
-	if key == "" || strings.Contains(key, "..") || strings.HasPrefix(key, "/") || strings.Contains(key, "\\") {
+func (l *Local) Close() error { return l.root.Close() }
+
+func localFile(key string) (string, error) {
+	if !fs.ValidPath(key) || key == "." || key == ".tmp" || strings.HasPrefix(key, ".tmp/") || strings.Contains(key, "\\") {
 		return "", errors.New("storage: invalid key")
 	}
-	return filepath.Join(l.root, filepath.FromSlash(key)), nil
+	return filepath.Localize(key)
 }
 
 func (l *Local) Parallelism() int { return 8 }
 
 func (l *Local) Get(_ context.Context, key string) (io.ReadCloser, int64, error) {
-	p, err := l.file(key)
+	p, err := localFile(key)
 	if err != nil {
 		return nil, 0, err
 	}
-	f, err := os.Open(p)
+	f, err := l.root.Open(p)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, 0, ErrNotFound
 	}
@@ -62,43 +65,41 @@ func (l *Local) Get(_ context.Context, key string) (io.ReadCloser, int64, error)
 }
 
 func (l *Local) Put(_ context.Context, key string, r io.Reader, _ int64) error {
-	p, err := l.file(key)
+	p, err := localFile(key)
 	if err != nil {
 		return err
 	}
-	var rnd [8]byte
-	rand.Read(rnd[:])
-	tmp := filepath.Join(l.tmp, hex.EncodeToString(rnd[:]))
-	f, err := os.Create(tmp)
+	tmp := filepath.Join(".tmp", rand.Text())
+	f, err := l.root.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o666)
 	if err != nil {
 		return err
 	}
 	if _, err := io.Copy(f, r); err != nil {
 		f.Close()
-		os.Remove(tmp)
+		l.root.Remove(tmp)
 		return err
 	}
 	if err := f.Close(); err != nil {
-		os.Remove(tmp)
+		l.root.Remove(tmp)
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		os.Remove(tmp)
+	if err := l.root.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		l.root.Remove(tmp)
 		return err
 	}
-	if err := os.Rename(tmp, p); err != nil {
-		os.Remove(tmp)
+	if err := l.root.Rename(tmp, p); err != nil {
+		l.root.Remove(tmp)
 		return err
 	}
 	return nil
 }
 
 func (l *Local) Stat(_ context.Context, key string) (ObjectInfo, error) {
-	p, err := l.file(key)
+	p, err := localFile(key)
 	if err != nil {
 		return ObjectInfo{}, err
 	}
-	st, err := os.Stat(p)
+	st, err := l.root.Stat(p)
 	if errors.Is(err, fs.ErrNotExist) {
 		return ObjectInfo{}, ErrNotFound
 	}
@@ -109,11 +110,11 @@ func (l *Local) Stat(_ context.Context, key string) (ObjectInfo, error) {
 }
 
 func (l *Local) Delete(_ context.Context, key string) error {
-	p, err := l.file(key)
+	p, err := localFile(key)
 	if err != nil {
 		return err
 	}
-	err = os.Remove(p)
+	err = l.root.Remove(p)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
@@ -121,14 +122,12 @@ func (l *Local) Delete(_ context.Context, key string) error {
 }
 
 func (l *Local) List(ctx context.Context, prefix string, fn func(ObjectInfo) error) error {
-	dir := prefix
-	if i := strings.LastIndexByte(dir, '/'); i >= 0 {
-		dir = dir[:i]
-	} else {
-		dir = ""
+	if prefix != "" {
+		if _, err := localFile(strings.TrimSuffix(prefix, "/")); err != nil {
+			return err
+		}
 	}
-	start := filepath.Join(l.root, filepath.FromSlash(dir))
-	err := filepath.WalkDir(start, func(p string, d fs.DirEntry, err error) error {
+	return fs.WalkDir(l.root.FS(), path.Dir(prefix), func(key string, d fs.DirEntry, err error) error {
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
 				return nil
@@ -138,22 +137,19 @@ func (l *Local) List(ctx context.Context, prefix string, fn func(ObjectInfo) err
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		rel, _ := filepath.Rel(l.root, p)
-		key := filepath.ToSlash(rel)
 		if d.IsDir() {
 			if key == ".tmp" {
-				return filepath.SkipDir
+				return fs.SkipDir
 			}
 			return nil
 		}
-		if !strings.HasPrefix(key, prefix) {
+		if !d.Type().IsRegular() || !strings.HasPrefix(key, prefix) {
 			return nil
 		}
 		info, err := d.Info()
 		if err != nil {
 			return nil
 		}
-		return fn(ObjectInfo{Key: path.Clean(key), Size: info.Size(), ModTime: info.ModTime()})
+		return fn(ObjectInfo{Key: key, Size: info.Size(), ModTime: info.ModTime()})
 	})
-	return err
 }

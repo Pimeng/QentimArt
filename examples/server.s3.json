@@ -1,13 +1,13 @@
 {
-  "listen": ":8080",
+  "listen": "127.0.0.1:8080",
   "storage": {
     "type": "s3",
     "s3": {
       "endpoint": "http://127.0.0.1:9000",
       "region": "us-east-1",
       "bucket": "qentimart",
-      "accessKey": "minioadmin",
-      "secretKey": "minioadmin",
+      "accessKey": "CHANGE-ME-bucket-access-key",
+      "secretKey": "CHANGE-ME-bucket-secret-key",
       "pathStyle": true,
       "prefix": "prod",
       "parallelism": 32

@@ -1,9 +1,9 @@
 """静态模式的只读传输：从公开 baseUrl 按对象键 GET，不需要鉴权。"""
 from __future__ import annotations
 
-import gzip
 import http.client
 import json
+import re
 import ssl
 import threading
 import time
@@ -12,11 +12,12 @@ from typing import Any, Callable, Optional
 from urllib.parse import urlsplit
 
 from ._errors import QentimArtError
+from ._http import read_response
 from ._localfs import run_pool
-from ._wire import decode_blob
+from ._wire import MAX_JSON, MAX_STORED, decode_blob, gunzip_capped, inflate_capped
 
 
-def _decode_body(data: bytes, encoding: Optional[str]) -> bytes:
+def _decode_body(data: bytes, encoding: Optional[str], limit: int) -> bytes:
     """按响应的 Content-Encoding 透明解压：http.client 不会自动处理传输层编码，
     而很多 CDN / 对象存储会对 index.json 之类的响应强制 gzip（即便请求 identity）。
     以响应头为准解码，对不带该头的 .gz 清单和原始 chunk 零影响。"""
@@ -24,12 +25,12 @@ def _decode_body(data: bytes, encoding: Optional[str]) -> bytes:
     if enc in ("", "identity"):
         return data
     if enc in ("gzip", "x-gzip"):
-        return gzip.decompress(data)
+        return gunzip_capped(data, limit)
     if enc == "deflate":
         try:
-            return zlib.decompress(data)
+            return inflate_capped(data, zlib.MAX_WBITS, limit)
         except zlib.error:
-            return zlib.decompress(data, -zlib.MAX_WBITS)  # 裸 deflate（无 zlib 头）
+            return inflate_capped(data, -zlib.MAX_WBITS, limit)
     if enc == "br":
         try:
             import brotli  # type: ignore
@@ -38,7 +39,16 @@ def _decode_body(data: bytes, encoding: Optional[str]) -> bytes:
                 import brotlicffi as brotli  # type: ignore
             except ImportError:
                 raise QentimArtError("response is brotli-encoded but no 'brotli' package is installed")
-        return brotli.decompress(data)
+        decoder = brotli.Decompressor()
+        try:
+            out = decoder.process(data, output_buffer_limit=limit + 1)
+        except TypeError:
+            raise QentimArtError("bounded brotli decoding requires an updated brotli package", code="ECORRUPT")
+        if len(out) > limit or not decoder.can_accept_more_data():
+            raise QentimArtError("brotli response exceeds size limit", code="ETOOBIG")
+        if not decoder.is_finished():
+            raise QentimArtError("truncated brotli response", code="ECORRUPT")
+        return out
     return data  # 未知编码：原样返回，交由上层解析报错
 
 
@@ -93,34 +103,34 @@ class StaticTransport:
             except Exception:
                 pass
 
-    def _get(self, rel: str) -> bytes:
+    def _get(self, rel: str, limit: int) -> bytes:
         conn = self._conn()
         try:
             conn.request("GET", self.base_path + "/" + rel)
-            resp = conn.getresponse()
-            data = resp.read()
-            encoding = resp.getheader("Content-Encoding")
+            with conn.getresponse() as resp:
+                if resp.status >= 300:
+                    raise QentimArtError("GET %s: HTTP %d" % (rel, resp.status), status=resp.status)
+                encoding = resp.getheader("Content-Encoding")
+                data = read_response(resp, limit)
         except Exception:
             self._drop_conn()
             raise
-        if resp.status >= 300:
-            raise QentimArtError("GET %s: HTTP %d" % (rel, resp.status), status=resp.status)
         try:
-            return _decode_body(data, encoding)
+            return _decode_body(data, encoding, limit)
         except QentimArtError:
             raise
         except Exception as e:
             raise QentimArtError("GET %s: cannot decode response body: %s" % (rel, e))
 
-    def get_buffer(self, rel: str, cancel: Optional[threading.Event] = None) -> bytes:
+    def get_buffer(self, rel: str, cancel: Optional[threading.Event] = None, limit: int = MAX_JSON) -> bytes:
         last: Optional[BaseException] = None
         for attempt in range(self.retries + 1):
             if cancel is not None and cancel.is_set():
                 raise QentimArtError("sync cancelled", code="ECANCELED")
             try:
-                return self._get(rel)
+                return self._get(rel, limit)
             except QentimArtError as e:
-                if e.status is not None and e.status < 500 and e.status != 429:
+                if e.code in ("ETOOBIG", "ECORRUPT") or (e.status is not None and e.status < 500 and e.status != 429):
                     raise
                 last = e
             except (OSError, http.client.HTTPException) as e:
@@ -140,7 +150,7 @@ class StaticTransport:
 
     def fetch_chunks(self, hashes, on_chunk, stats, cancel) -> None:
         def one(h: str) -> None:
-            buf = self.get_buffer("chunks/%s/%s" % (h[:2], h), cancel)
+            buf = self.get_buffer("chunks/%s/%s" % (h[:2], h), cancel, limit=5 + MAX_STORED)
             raw = decode_blob(h, buf)
             with stats.lock:
                 stats.downloaded_wire += len(buf)
@@ -156,6 +166,8 @@ def version_from_index(idx: dict, version: str, prerelease: bool) -> dict:
         v = idx.get("latestPrerelease") if prerelease else idx.get("latest")
     if not v:
         raise QentimArtError("project has no versions")
+    if not isinstance(v, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?", v):
+        raise QentimArtError("invalid version in index", code="ECORRUPT")
     for x in idx.get("versions", []):
         if x.get("version") == v:
             return x

@@ -25,8 +25,6 @@ import (
 )
 
 const (
-	maxManifestBytes   = 1 << 30   // 解压后的 manifest JSON 大小上限
-	maxManifestUpload  = 256 << 20 // gzip 压缩的 manifest 请求体大小上限
 	maxMissingRequest  = 65536
 	uploadParallelBase = 4
 )
@@ -103,7 +101,7 @@ type handlerFunc func(w http.ResponseWriter, r *http.Request, p *project) error
 func (s *Server) auth(role int, h handlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		name := r.PathValue("project")
-		if !projectRe.MatchString(name) {
+		if !projectRe.MatchString(name) || manifest.ValidatePath(name) != nil {
 			s.writeErr(w, errBad("invalid project name"))
 			return
 		}
@@ -111,6 +109,9 @@ func (s *Server) auth(role int, h handlerFunc) http.Handler {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="qentimart"`)
 			s.writeErr(w, &httpError{http.StatusUnauthorized, "missing or insufficient token"})
 			return
+		}
+		if !s.cfg.AllowAnonymousRead && len(s.tokens) > 0 {
+			w.Header().Set("Cache-Control", "private, no-store")
 		}
 		p, err := s.getProject(name)
 		if err != nil {
@@ -156,6 +157,7 @@ func (s *Server) writeErr(w http.ResponseWriter, err error) {
 		msg = "internal server error"
 	}
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
@@ -168,6 +170,13 @@ func writeJSON(w http.ResponseWriter, v any) error {
 func boolQuery(r *http.Request, k string) bool {
 	b, _ := strconv.ParseBool(r.URL.Query().Get(k))
 	return b
+}
+
+// 仅公开可读的制品允许共享缓存跳过回源鉴权。
+func (s *Server) cacheImmutable(w http.ResponseWriter) {
+	if s.cfg.AllowAnonymousRead || len(s.tokens) == 0 {
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	}
 }
 
 // ---- 版本 ----
@@ -209,7 +218,7 @@ func (s *Server) handleManifest(w http.ResponseWriter, r *http.Request, p *proje
 	w.Header().Set("X-QentimArt-Version", vi.Version)
 	w.Header().Set("Content-Length", strconv.Itoa(len(c.gz)))
 	if req != "latest" {
-		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		s.cacheImmutable(w)
 	}
 	_, err = w.Write(c.gz)
 	return err
@@ -248,14 +257,14 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request, p *project
 	if err != nil {
 		return errBad(err.Error())
 	}
-	gz, err := io.ReadAll(io.LimitReader(r.Body, maxManifestUpload+1))
+	gz, err := io.ReadAll(io.LimitReader(r.Body, manifest.MaxCompressedBytes+1))
 	if err != nil {
 		return err
 	}
-	if len(gz) > maxManifestUpload {
+	if len(gz) > manifest.MaxCompressedBytes {
 		return errBad("manifest too large")
 	}
-	m, err := manifest.Decode(gz, maxManifestBytes)
+	m, err := manifest.Decode(gz, manifest.MaxRawBytes)
 	if err != nil {
 		return errBad(err.Error())
 	}
@@ -267,8 +276,11 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request, p *project
 	if err != nil {
 		return err
 	}
-	if _, ok := vs[v]; ok {
+	// 直接查实际存储键，大小写不敏感的文件系统也不能覆盖已有版本。
+	if _, err := s.store.Stat(ctx, metaKey(p.name, v)); err == nil {
 		return &httpError{http.StatusConflict, "version " + v + " already exists (versions are immutable)"}
+	} else if !errors.Is(err, storage.ErrNotFound) {
+		return err
 	}
 	if err := s.ensureChunks(ctx, p); err != nil {
 		return err
@@ -466,7 +478,7 @@ func (s *Server) handleFetch(w http.ResponseWriter, r *http.Request, p *project)
 				return
 			}
 			go func(i int, h wire.Hash) {
-				b, err := storage.ReadAll(ctx, s.store, chunkKey(p.name, h))
+				b, err := storage.ReadAll(ctx, s.store, chunkKey(p.name, h), wire.MaxBlobSize)
 				results[i] <- result{b, err}
 			}(i, h)
 		}
@@ -518,7 +530,7 @@ func (s *Server) handleGetChunk(w http.ResponseWriter, r *http.Request, p *proje
 	if err != nil {
 		return errBad(err.Error())
 	}
-	b, err := storage.ReadAll(r.Context(), s.store, chunkKey(p.name, h))
+	b, err := storage.ReadAll(r.Context(), s.store, chunkKey(p.name, h), wire.MaxBlobSize)
 	if errors.Is(err, storage.ErrNotFound) {
 		return errNotFound("chunk not found")
 	}
@@ -535,7 +547,7 @@ func (s *Server) handleGetChunk(w http.ResponseWriter, r *http.Request, p *proje
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Length", strconv.Itoa(len(raw)))
-	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	s.cacheImmutable(w)
 	_, err = w.Write(raw)
 	return err
 }
@@ -665,11 +677,11 @@ func (s *Server) logRequests(h http.Handler) http.Handler {
 		sw := &statusWriter{ResponseWriter: w}
 		defer func() {
 			if v := recover(); v != nil {
-				s.log.Printf("%s %s aborted after %s (%s)", r.Method, r.URL.Path, time.Since(start).Round(time.Millisecond), human(sw.n))
+				s.log.Printf("%s %s aborted after %s (%s)", r.Method, r.URL.EscapedPath(), time.Since(start).Round(time.Millisecond), human(sw.n))
 				panic(v)
 			}
 			if r.URL.Path != "/healthz" {
-				s.log.Printf("%s %s %d %s %s", r.Method, r.URL.Path, sw.status, human(sw.n), time.Since(start).Round(time.Millisecond))
+				s.log.Printf("%s %s %d %s %s", r.Method, r.URL.EscapedPath(), sw.status, human(sw.n), time.Since(start).Round(time.Millisecond))
 			}
 		}()
 		h.ServeHTTP(sw, r)

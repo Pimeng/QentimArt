@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"qentimart/internal/catalog"
 )
 
 // Client 是用于 QentimArt API 的轻量 HTTP 客户端（供 CLI 使用）。
@@ -33,7 +35,16 @@ func NewClient(server, project, token string, concurrency int) *Client {
 		WriteBufferSize:     256 << 10,
 		ReadBufferSize:      256 << 10,
 	}
-	return &Client{Server: strings.TrimRight(server, "/"), Project: project, Token: token, HTTP: &http.Client{Transport: tr}}
+	return &Client{Server: strings.TrimRight(server, "/"), Project: project, Token: token, HTTP: &http.Client{
+		Transport: tr,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			origin := via[0].URL
+			if !strings.EqualFold(req.URL.Host, origin.Host) || req.URL.Scheme != origin.Scheme || len(via) >= 10 {
+				return http.ErrUseLastResponse
+			}
+			return nil
+		},
+	}}
 }
 
 func (c *Client) url(p string) string {
@@ -94,8 +105,8 @@ func (c *Client) JSON(ctx context.Context, method, path string, body []byte, out
 	}
 	defer resp.Body.Close()
 	if out == nil {
-		_, err = io.Copy(io.Discard, resp.Body)
+		_, err = io.Copy(io.Discard, io.LimitReader(resp.Body, catalog.MaxJSONBytes))
 		return err
 	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	return json.NewDecoder(io.LimitReader(resp.Body, catalog.MaxJSONBytes)).Decode(out)
 }

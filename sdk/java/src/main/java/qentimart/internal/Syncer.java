@@ -10,8 +10,11 @@ import qentimart.internal.Planner.WriteTask;
 
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.FileVisitResult;
 import java.nio.file.LinkOption;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -70,12 +73,12 @@ public final class Syncer {
         return out;
     }
 
-    public static void applyWrites(Path root, String policy, Plan plan, SourceIndex sources, Stats stats,
+    public static void applyWrites(Path root, Plan plan, SourceIndex sources, Stats stats,
                                    Map<String, Long> newTracked, long writeBytes, Progress progress,
                                    AtomicBoolean cancel, ChunkFetcher fetcher, long waveBytes, int waveFiles) throws IOException {
-        Path tmpDir = root.resolve(Wire.STATE_DIR).resolve(State.TMP_DIR);
+        Path tmpDir = State.tmpDir(root);
         LocalFs.rmTree(tmpDir);
-        Files.createDirectories(tmpDir);
+        Files.createDirectory(tmpDir);
         Set<String> deleteSet = new HashSet<>(plan.toDelete);
         int seq = 0;
         for (List<WriteTask> wave : waves(plan.toWrite, waveBytes, waveFiles)) {
@@ -84,14 +87,14 @@ public final class Syncer {
             for (int i = 0; i < wave.size(); i++) tmps.add(tmpDir.resolve((seq++) + ".part"));
             List<PositionedFile> handles = new ArrayList<>(Collections.nCopies(wave.size(), (PositionedFile) null));
             try {
-                applyWave(root, policy, wave, tmps, handles, sources, stats, newTracked, writeBytes, progress, cancel, deleteSet, fetcher);
+                applyWave(root, wave, tmps, handles, sources, stats, newTracked, writeBytes, progress, cancel, deleteSet, fetcher);
             } finally {
                 for (PositionedFile h : handles) if (h != null) h.close();
             }
         }
     }
 
-    private static void applyWave(Path root, String policy, List<WriteTask> wave, List<Path> tmps, List<PositionedFile> handles,
+    private static void applyWave(Path root, List<WriteTask> wave, List<Path> tmps, List<PositionedFile> handles,
                                   SourceIndex sources, Stats stats, Map<String, Long> newTracked, long writeBytes,
                                   Progress progress, AtomicBoolean cancel, Set<String> deleteSet, ChunkFetcher fetcher) throws IOException {
         List<Integer> idx = new ArrayList<>();
@@ -107,6 +110,7 @@ public final class Syncer {
         }
 
         WriteChunk writeChunk = (n, data) -> {
+            if (data.length != n.size) throw new QentimArtException("chunk length differs from manifest", -1, "ECORRUPT");
             for (Object[] d : n.dests) ((PositionedFile) d[0]).writeAt((Long) d[1], data);
             long done = stats.written.addAndGet((long) data.length * n.dests.size());
             progress.emit("download", done, writeBytes, false);
@@ -126,7 +130,7 @@ public final class Syncer {
                         if (!readers.containsKey(s.path)) {
                             PositionedFile r;
                             try {
-                                r = PositionedFile.open(root.resolve(s.path), false, 0);
+                                r = PositionedFile.open(LocalFs.checkedParent(root, s.path), false, 0);
                             } catch (IOException ex) {
                                 r = null;
                             }
@@ -141,7 +145,7 @@ public final class Syncer {
                     } catch (IOException ex) {
                         continue;
                     }
-                    if (data.length == s.size && Wire.sha256Hex(data).equals(h)) {
+                    if (data.length == s.size && s.size == n.size && Wire.sha256Hex(data).equals(h)) {
                         writeChunk.run(n, data);
                         stats.reusedLocal.addAndGet(data.length);
                         return;
@@ -172,10 +176,17 @@ public final class Syncer {
             handles.set(i, null);
         }
         for (int i = 0; i < wave.size(); i++) {
+            var file = wave.get(i).t;
+            if (file.chunks().size() > 1 && !LocalFs.hashFile(tmps.get(i)).equals(file.hash())) {
+                throw new QentimArtException("file hash differs from manifest: " + file.path(), -1, "ECORRUPT");
+            }
+        }
+        for (int i = 0; i < wave.size(); i++) {
             WriteTask w = wave.get(i);
             Path target = root.resolve(w.t.path());
-            ensureParent(root, w.t.path(), deleteSet, policy);
-            if (w.reason.equals("replace-dir")) LocalFs.rmTree(target);
+            ensureParent(root, w.t.path(), deleteSet);
+            if (w.reason.equals("replace-dir")) removePlannedDirectory(root, target, deleteSet);
+            if (w.reason.equals("create")) requireAbsentDestination(target, w.t.path());
             try {
                 LocalFs.replaceRetry(tmps.get(i), target);
             } catch (IOException e) {
@@ -186,9 +197,19 @@ public final class Syncer {
         }
     }
 
+    private static void requireAbsentDestination(Path target, String rel) throws IOException {
+        try {
+            Files.readAttributes(target, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+        } catch (NoSuchFileException e) {
+            return;
+        }
+        // An existing name can alias this path on a case-insensitive filesystem.
+        throw new QentimArtException("local file blocks creation: " + rel, -1, "ECONFLICT");
+    }
+
     // 逐段创建父目录，绝不跟随符号链接：若某个已存在的祖先是符号链接，拒绝写入，
     // 以免清单路径合法但本地父目录指向 root 之外时，原子替换把文件写到 root 外（逃逸）。
-    private static void ensureParent(Path root, String rel, Set<String> deleteSet, String policy) throws IOException {
+    private static void ensureParent(Path root, String rel, Set<String> deleteSet) throws IOException {
         int slash = rel.lastIndexOf('/');
         if (slash < 0) return;
         String parent = rel.substring(0, slash);
@@ -202,15 +223,13 @@ public final class Syncer {
             BasicFileAttributes at;
             try {
                 at = Files.readAttributes(ap, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
-            } catch (IOException e) {
+            } catch (NoSuchFileException e) {
                 at = null; // 不存在
             }
-            if (at != null && at.isSymbolicLink()) {
-                throw new QentimArtException("unsafe path " + rel + ": '" + p + "' is a symlink", -1, "EUNSAFE");
-            }
-            if (at != null && !at.isDirectory()) {
+            if (at != null && !LocalFs.realDirectory(ap, at)) {
+                if (!at.isRegularFile()) throw new QentimArtException("unsafe path " + rel + ": " + p, -1, "EUNSAFE");
                 // 该位置是普通文件，但需要它是目录（例如 "a" -> "a/b"）。
-                if (!deleteSet.contains(p) && !policy.equals("overwrite")) {
+                if (!deleteSet.contains(p)) {
                     throw new QentimArtException(p + " is a file but " + rel + " needs it to be a directory");
                 }
                 Files.deleteIfExists(ap);
@@ -222,6 +241,35 @@ public final class Syncer {
         }
     }
 
+    /** Remove only files authorized by the plan. Newly appeared children must survive a replacement. */
+    private static void removePlannedDirectory(Path root, Path target, Set<String> deleteSet) throws IOException {
+        LocalFs.requireDirectory(target);
+        Files.walkFileTree(target, new SimpleFileVisitor<>() {
+            @Override
+            public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) throws IOException {
+                LocalFs.requireDirectory(dir);
+                return FileVisitResult.CONTINUE;
+            }
+
+            @Override
+            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
+                String rel = root.relativize(file).toString().replace(java.io.File.separatorChar, '/');
+                if (!attrs.isRegularFile() || !deleteSet.contains(rel)) {
+                    throw new QentimArtException("local file blocks directory replacement: " + rel, -1, "ECONFLICT");
+                }
+                Files.delete(file);
+                return FileVisitResult.CONTINUE;
+            }
+
+            @Override
+            public FileVisitResult postVisitDirectory(Path dir, IOException error) throws IOException {
+                if (error != null) throw error;
+                Files.delete(dir);
+                return FileVisitResult.CONTINUE;
+            }
+        });
+    }
+
     /** 删除操作放在最后执行，以便被删除的文件仍可作为块来源。 */
     public static void deleteFiles(Path root, List<String> paths) throws IOException {
         for (String p : paths) {
@@ -230,6 +278,7 @@ public final class Syncer {
             // 用 NOFOLLOW：真实目录才跳过，符号链接按条目本身删除、绝不跟随到外部目标。
             if (!Files.exists(ap, LinkOption.NOFOLLOW_LINKS)
                     || Files.isDirectory(ap, LinkOption.NOFOLLOW_LINKS)) continue;
+            LocalFs.checkedParent(root, p);
             Files.deleteIfExists(ap);
             LocalFs.pruneEmptyDirs(root, p);
         }

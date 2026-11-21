@@ -4,12 +4,16 @@ import qentimart.Manifest;
 import qentimart.QentimArtException;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
@@ -25,6 +29,45 @@ public final class State {
     public static final String MANIFEST_FILE = "manifest.json.gz";
     public static final String TMP_DIR = "tmp";
     public static final String LOCK_FILE = "lock";
+    private static final long INCOMPLETE_LOCK_GRACE_MS = 60_000;
+
+    private static Path stateDir(Path root, boolean create) {
+        Path sd = root.resolve(Wire.STATE_DIR);
+        try {
+            if (create) {
+                try {
+                    Files.createDirectory(sd);
+                } catch (FileAlreadyExistsException ignored) {
+                    // Validate the existing entry below.
+                }
+            }
+            LocalFs.requireDirectory(sd);
+        } catch (NoSuchFileException e) {
+            if (create) throw new QentimArtException("cannot create state directory", e);
+        } catch (IOException e) {
+            throw new QentimArtException("cannot access state directory", e);
+        }
+        return sd;
+    }
+
+    public static Path tmpDir(Path root) throws IOException {
+        Path tmp = stateDir(root, false).resolve(TMP_DIR);
+        try {
+            LocalFs.requireDirectory(tmp);
+        } catch (NoSuchFileException ignored) {
+            // A clean sync starts without a temporary directory.
+        }
+        return tmp;
+    }
+
+    private static byte[] readRegular(Path file, long limit) throws IOException {
+        if (!Files.readAttributes(file, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS).isRegularFile()) {
+            throw new QentimArtException("unsafe state file: " + file, -1, "EUNSAFE");
+        }
+        try (InputStream in = Files.newInputStream(file, LinkOption.NOFOLLOW_LINKS)) {
+            return Wire.readCapped(in, limit, file.getFileName().toString());
+        }
+    }
 
     public static final class Read {
         public final Map<String, Object> state;   // null 表示无/不可用
@@ -39,23 +82,25 @@ public final class State {
     }
 
     public static Read read(Path root) {
-        Path sd = root.resolve(Wire.STATE_DIR);
+        Path sd = stateDir(root, false);
         Map<String, Object> state = null;
         Manifest manifest = null;
         byte[] gz = null;
         try {
-            Map<String, Object> s = Json.parseObject(Files.readAllBytes(sd.resolve(STATE_FILE)));
+            Map<String, Object> s = Json.parseObject(readRegular(sd.resolve(STATE_FILE), Wire.MAX_MANIFEST_RAW));
             Object fv = s.get("formatVersion");
-            state = (fv instanceof Long && (Long) fv == 1L) ? s : null;
+            state = (fv instanceof Long && (Long) fv == 1L && s.get("files") instanceof Map<?, ?>) ? s : null;
         } catch (IOException | RuntimeException e) {
+            if (e instanceof QentimArtException qe && "EUNSAFE".equals(qe.code)) throw qe;
             state = null;
         }
         if (state != null) {
             try {
-                gz = Files.readAllBytes(sd.resolve(MANIFEST_FILE));
+                gz = readRegular(sd.resolve(MANIFEST_FILE), Wire.MAX_MANIFEST_GZ);
                 manifest = Wire.parseManifest(gz);
                 if (!Objects.equals(manifest.version, state.get("version"))) manifest = null;
             } catch (IOException | RuntimeException e) {
+                if (e instanceof QentimArtException qe && "EUNSAFE".equals(qe.code)) throw qe;
                 manifest = null;
             }
         }
@@ -63,14 +108,12 @@ public final class State {
     }
 
     public static void write(Path root, Map<String, Object> state, byte[] gz) throws IOException {
-        Path sd = root.resolve(Wire.STATE_DIR);
-        Files.createDirectories(sd);
+        Path sd = stateDir(root, true);
         LocalFs.writeAtomic(sd.resolve(MANIFEST_FILE), gz);
         LocalFs.writeAtomic(sd.resolve(STATE_FILE), Json.writeBytes(state, false));
     }
 
-    // 进程内已持锁的目录（绝对路径）。文件锁的陈旧抢占含 "pid≠自己" 判定，故同进程内
-    // 多线程并发同步同目录时彼此会误判对方锁为陈旧并互夺；这一层在文件锁之前提供进程内互斥。
+    // 同一进程内先按目录互斥，不必等另一个线程将 PID 写入锁文件。
     private static final Set<String> IN_PROCESS = ConcurrentHashMap.newKeySet();
 
     /** 获取同步锁；返回释放函数。另一个活着的进程（或本进程另一处）持锁时抛 ELOCKED。 */
@@ -80,19 +123,16 @@ public final class State {
             throw new QentimArtException("another sync is running on " + root + " (this process)", -1, "ELOCKED");
         }
         try {
-            Path sd = root.resolve(Wire.STATE_DIR);
-            try {
-                Files.createDirectories(sd);
-            } catch (IOException e) {
-                throw new QentimArtException("cannot create " + sd + ": " + e.getMessage(), e);
-            }
+            Path sd = stateDir(root, true);
             Path lock = sd.resolve(LOCK_FILE);
             Runnable release = () -> {
-                IN_PROCESS.remove(key);
                 try {
+                    LocalFs.requireDirectory(sd);
                     Files.deleteIfExists(lock);
                 } catch (IOException ignored) {
                     // 忽略
+                } finally {
+                    IN_PROCESS.remove(key);
                 }
             };
             for (int i = 0; i < 2; i++) {
@@ -100,27 +140,37 @@ public final class State {
                     Map<String, Object> info = new LinkedHashMap<>();
                     info.put("pid", LocalFs.currentPid());
                     info.put("at", System.currentTimeMillis());
-                    ch.write(ByteBuffer.wrap(Json.writeBytes(info, false)));
+                    ByteBuffer record = ByteBuffer.wrap(Json.writeBytes(info, false));
+                    while (record.hasRemaining()) ch.write(record);
                     return release;
                 } catch (FileAlreadyExistsException e) {
-                    boolean stale = true;
+                    long pid = 0;
                     try {
-                        Map<String, Object> info = Json.parseObject(Files.readAllBytes(lock));
-                        long pid = info.get("pid") instanceof Number ? ((Number) info.get("pid")).longValue() : 0;
-                        if (pid != 0 && pid != LocalFs.currentPid() && LocalFs.pidAlive(pid)) stale = false;
-                    } catch (IOException | RuntimeException ex) {
-                        // 无法解析 → 视为陈旧
+                        Object record = Json.parse(readRegular(lock, 4096));
+                        if (record instanceof Map<?, ?> info && info.get("pid") instanceof Long value
+                                && value > 0 && value <= Integer.MAX_VALUE) pid = value;
+                    } catch (NoSuchFileException ex) {
+                        continue;
+                    } catch (IllegalArgumentException ignored) {
+                        // An interrupted write can leave a partial lock record.
+                    } catch (QentimArtException ex) {
+                        if (!"ETOOLARGE".equals(ex.code)) throw ex;
+                    }
+                    boolean stale;
+                    try {
+                        stale = pid > 0 ? !LocalFs.pidAlive(pid)
+                                : System.currentTimeMillis() - Files.getLastModifiedTime(lock, LinkOption.NOFOLLOW_LINKS).toMillis() > INCOMPLETE_LOCK_GRACE_MS;
+                    } catch (NoSuchFileException ex) {
+                        continue;
                     }
                     if (!stale) throw new QentimArtException("another sync is running on " + root, -1, "ELOCKED");
-                    try {
-                        Files.deleteIfExists(lock); // 只清理陈旧锁文件，保留进程内持有
-                    } catch (IOException ignored) {
-                    }
-                } catch (IOException e) {
-                    throw new QentimArtException("cannot lock " + root + ": " + e.getMessage(), e);
+                    Files.deleteIfExists(lock);
                 }
             }
             throw new QentimArtException("could not lock " + root, -1, "ELOCKED");
+        } catch (IOException e) {
+            IN_PROCESS.remove(key);
+            throw new QentimArtException("cannot lock " + root + ": " + e.getMessage(), e);
         } catch (RuntimeException e) {
             IN_PROCESS.remove(key);
             throw e;

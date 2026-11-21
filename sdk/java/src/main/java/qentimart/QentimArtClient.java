@@ -54,6 +54,7 @@ public final class QentimArtClient implements AutoCloseable {
 
     public final String mode; // "api" | "static"
     public final String project;
+    private final String source;
     private final HttpTransport http;     // 可空
     private final StaticTransport stat;    // 可空
     private final int concurrency;
@@ -76,6 +77,7 @@ public final class QentimArtClient implements AutoCloseable {
         this.project = project;
         this.concurrency = concurrency;
         this.http = new HttpTransport(server, project, token, 60000, 3);
+        this.source = HttpTransport.sourceKey(server);
         this.stat = null;
     }
 
@@ -84,6 +86,7 @@ public final class QentimArtClient implements AutoCloseable {
         this.project = project;
         this.concurrency = concurrency;
         this.stat = new StaticTransport(baseUrl, concurrency, 60000, 3);
+        this.source = HttpTransport.sourceKey(baseUrl);
         this.http = null;
     }
 
@@ -142,7 +145,7 @@ public final class QentimArtClient implements AutoCloseable {
     ManifestRaw fetchManifestRaw(String version, boolean prerelease) {
         if (mode.equals("static")) {
             Map<String, Object> vi = getVersion(version, prerelease);
-            String v = vi.get("version").toString();
+            String v = Wire.validateVersion(vi.get("version"));
             byte[] gz = stat.getBuffer("versions/" + v + "/manifest.json.gz", Wire.MAX_MANIFEST_GZ, null);
             return new ManifestRaw(v, gz);
         }
@@ -153,7 +156,13 @@ public final class QentimArtClient implements AutoCloseable {
     }
 
     public Manifest fetchManifest(String version, boolean prerelease) {
-        return Wire.parseManifest(fetchManifestRaw(version, prerelease).gz);
+        ManifestRaw raw = fetchManifestRaw(version, prerelease);
+        Manifest manifest = Wire.parseManifest(raw.gz);
+        if ((raw.version != null && !manifest.version.equals(raw.version))
+                || (!"latest".equals(version) && !manifest.version.equals(version))) {
+            throw new QentimArtException("manifest version mismatch", -1, "ECORRUPT");
+        }
+        return manifest;
     }
 
     /** 取一批块，每块解码校验后回调 onChunk(hash, raw)。动态批量 / 静态逐块。 */
@@ -255,18 +264,19 @@ public final class QentimArtClient implements AutoCloseable {
         } : State.acquireLock(root);
         try {
             State.Read sr = State.read(root);
-            boolean sameProject = sr.state != null && Objects.equals(sr.state.get("project"), project);
+            boolean sameProject = matchesState(sr);
 
             progress.emit("resolve", 0, 1, true);
             String version = o.version;
-            if (version.equals("latest")) version = getVersion("latest", o.prerelease).get("version").toString();
+            if (version.equals("latest")) version = Wire.validateVersion(getVersion("latest", o.prerelease).get("version"));
             byte[] targetGz;
-            if (sameProject && sr.manifest != null && sr.manifest.version.equals(version)) {
+            if (sameProject && source.equals(sr.state.get("source")) && sr.manifest != null && sr.manifest.version.equals(version)) {
                 targetGz = sr.gz;
             } else {
                 targetGz = fetchManifestRaw(version, false).gz;
             }
             Manifest target = Wire.parseManifest(targetGz);
+            if (!target.version.equals(version)) throw new QentimArtException("manifest version mismatch", -1, "ECORRUPT");
 
             progress.emit("scan", 0, 1, true);
             Scan scan = LocalFs.scanDir(root);
@@ -278,6 +288,7 @@ public final class QentimArtClient implements AutoCloseable {
             ctx.deleteUntrackedOnFirstSync = o.deleteUntrackedOnFirstSync;
             ctx.files = scan.files();
             ctx.dirs = scan.dirs();
+            ctx.special = scan.special();
             ctx.old = sameProject ? sr.manifest : null;
             ctx.tracked = sameProject ? trackedMap(sr.state) : new HashMap<>();
             ctx.hasState = sameProject && sr.manifest != null;
@@ -293,7 +304,7 @@ public final class QentimArtClient implements AutoCloseable {
             ctx.verifyWanted = p -> vexact.contains(p) || vpre.stream().anyMatch(p::startsWith);
 
             Plan plan = Planner.buildPlan(ctx, target);
-            if (!plan.conflicts.isEmpty() && policy.equals("fail")) throw new SyncConflictException(plan.conflicts);
+            if (!plan.conflicts.isEmpty()) throw new SyncConflictException(plan.conflicts);
 
             SourceIndex sources = Planner.buildSources(ctx, target, plan);
             long totalBytes = 0;
@@ -342,7 +353,7 @@ public final class QentimArtClient implements AutoCloseable {
             Map<String, Long> newTracked = plan.newTracked;
             if (!plan.toWrite.isEmpty()) {
                 try {
-                    Syncer.applyWrites(root, policy, plan, sources, stats, newTracked, writeBytes, progress, o.cancel,
+                    Syncer.applyWrites(root, plan, sources, stats, newTracked, writeBytes, progress, o.cancel,
                             (hashes, sizeOf, onChunk, st, cancel) -> fetchChunks(hashes, sizeOf, onChunk, st, cancel),
                             waveBytes, waveFiles);
                 } catch (IOException e) {
@@ -352,8 +363,8 @@ public final class QentimArtClient implements AutoCloseable {
 
             progress.emit("cleanup", 0, plan.toDelete.size(), true);
             try {
+                LocalFs.rmTree(State.tmpDir(root));
                 Syncer.deleteFiles(root, plan.toDelete);
-                LocalFs.rmTree(root.resolve(Wire.STATE_DIR).resolve(State.TMP_DIR));
             } catch (IOException e) {
                 throw new QentimArtException("cleanup failed: " + e.getMessage(), e);
             }
@@ -361,6 +372,7 @@ public final class QentimArtClient implements AutoCloseable {
             Map<String, Object> newState = new LinkedHashMap<>();
             newState.put("formatVersion", 1L);
             newState.put("project", project);
+            newState.put("source", source);
             newState.put("version", version);
             newState.put("syncedAt", ISO_MS.format(Instant.now()));
             newState.put("files", new TreeMap<>(newTracked));
@@ -402,7 +414,7 @@ public final class QentimArtClient implements AutoCloseable {
         Path root = Paths.get(dir).toAbsolutePath().normalize();
         State.Read sr = State.read(root);
         LinkedHashMap<String, Object> r = new LinkedHashMap<>();
-        if (sr.state == null || sr.manifest == null || !Objects.equals(sr.state.get("project"), project)) {
+        if (!matchesState(sr) || sr.manifest == null) {
             r.put("synced", false);
             r.put("project", sr.state != null ? sr.state.get("project") : null);
             r.put("version", null);
@@ -424,7 +436,7 @@ public final class QentimArtClient implements AutoCloseable {
         }
         qentimart.internal.Pool.run(suspicious, 4, f -> {
             try {
-                if (!LocalFs.hashFile(root.resolve(f.path())).equals(f.hash())) modified.add(f.path());
+                if (!LocalFs.hashFile(root, f.path()).equals(f.hash())) modified.add(f.path());
             } catch (IOException e) {
                 modified.add(f.path());
             }
@@ -453,7 +465,7 @@ public final class QentimArtClient implements AutoCloseable {
     public Map<String, Object> verify(String dir, Consumer<ProgressEvent> onProgress) {
         Path root = Paths.get(dir).toAbsolutePath().normalize();
         State.Read sr = State.read(root);
-        if (sr.state == null || sr.manifest == null) throw new QentimArtException(root + " has not been synced yet");
+        if (!matchesState(sr) || sr.manifest == null) throw new QentimArtException(root + " has not been synced yet");
         List<String> bad = Collections.synchronizedList(new ArrayList<>());
         long total = 0;
         for (ManifestFile f : sr.manifest.files.values()) total += f.size();
@@ -462,7 +474,7 @@ public final class QentimArtClient implements AutoCloseable {
         qentimart.internal.Pool.run(sr.manifest.files.values(), 4, f -> {
             boolean ok;
             try {
-                ok = LocalFs.hashFile(root.resolve(f.path())).equals(f.hash());
+                ok = LocalFs.hashFile(root, f.path()).equals(f.hash());
             } catch (IOException e) {
                 ok = false;
             }
@@ -490,13 +502,12 @@ public final class QentimArtClient implements AutoCloseable {
         return new StorageReport(asset, overhead, ratio);
     }
 
-    @SuppressWarnings("unchecked")
     private static Map<String, Long> trackedMap(Map<String, Object> state) {
         Map<String, Long> out = new HashMap<>();
         Object f = state.get("files");
-        if (f instanceof Map) {
-            for (Map.Entry<String, Object> e : ((Map<String, Object>) f).entrySet()) {
-                out.put(e.getKey(), ((Number) e.getValue()).longValue());
+        if (f instanceof Map<?, ?> files) {
+            for (Map.Entry<?, ?> e : files.entrySet()) {
+                if (e.getKey() instanceof String path && e.getValue() instanceof Long mtime) out.put(path, mtime);
             }
         }
         return out;
@@ -504,5 +515,10 @@ public final class QentimArtClient implements AutoCloseable {
 
     private static String str(Object o) {
         return o == null ? null : o.toString();
+    }
+
+    private boolean matchesState(State.Read sr) {
+        return sr.state != null && Objects.equals(sr.state.get("project"), project)
+                && (sr.state.get("source") == null || source.equals(sr.state.get("source")));
     }
 }

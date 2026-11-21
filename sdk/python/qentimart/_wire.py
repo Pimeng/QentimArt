@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import io
 import json
 import re
 import struct
@@ -18,6 +19,37 @@ ENC_DEFLATE = 1
 ENC_MISSING = 0xFF
 _HDR = struct.Struct(">32sBII")
 _READ_SIZE = 1 << 20
+MAX_CHUNK_SIZE = 16 << 20
+MAX_STORED = MAX_CHUNK_SIZE + 1024
+MAX_MANIFEST_GZ = 256 << 20
+MAX_MANIFEST_RAW = 1 << 30
+MAX_JSON = 64 << 20
+
+
+def read_capped(stream, limit: int) -> bytes:
+    out = io.BytesIO()
+    while True:
+        part = stream.read(min(_READ_SIZE, limit + 1 - out.tell()))
+        if not part:
+            return out.getvalue()
+        if len(part) > limit - out.tell():
+            raise QentimArtError("response exceeds %d bytes" % limit, code="ETOOBIG")
+        out.write(part)
+
+
+def gunzip_capped(data: bytes, limit: int) -> bytes:
+    with gzip.GzipFile(fileobj=io.BytesIO(data)) as stream:
+        return read_capped(stream, limit)
+
+
+def inflate_capped(data: bytes, wbits: int, limit: int) -> bytes:
+    dec = zlib.decompressobj(wbits)
+    out = dec.decompress(data, limit + 1)
+    if len(out) > limit:
+        raise QentimArtError("inflated data exceeds %d bytes" % limit, code="ETOOBIG")
+    if not dec.eof or dec.unused_data:
+        raise QentimArtError("invalid deflate stream", code="ECORRUPT")
+    return out
 
 
 def iter_frames(resp) -> Iterator[Tuple[str, int, int, bytes]]:
@@ -46,6 +78,8 @@ def iter_frames(resp) -> Iterator[Tuple[str, int, int, bytes]]:
             return
         h, enc, raw_len, stored = _HDR.unpack_from(buf, pos)
         pos += FRAME_HEADER_LEN
+        if raw_len > MAX_CHUNK_SIZE or stored > MAX_STORED:
+            raise QentimArtError("chunk frame exceeds size limit", code="ETOOBIG")
         if not fill(stored):
             raise QentimArtError("truncated chunk stream", code="ETRUNCATED")
         payload = bytes(buf[pos:pos + stored])
@@ -54,11 +88,13 @@ def iter_frames(resp) -> Iterator[Tuple[str, int, int, bytes]]:
 
 
 def decode_chunk(hash_hex: str, enc: int, raw_len: int, payload: bytes) -> bytes:
+    if not 0 <= raw_len <= MAX_CHUNK_SIZE or len(payload) > MAX_STORED:
+        raise QentimArtError("chunk exceeds size limit", code="ETOOBIG")
     if enc == ENC_RAW:
         raw = payload
     elif enc == ENC_DEFLATE:
         try:
-            raw = zlib.decompress(payload, -15)
+            raw = inflate_capped(payload, -15, raw_len)
         except zlib.error as e:
             raise QentimArtError("chunk %s: bad deflate data: %s" % (hash_hex, e), code="ECORRUPT")
     elif enc == ENC_MISSING:
@@ -98,17 +134,20 @@ class Manifest(NamedTuple):
     files: Dict[str, ManifestFile]
 
 
-_DRIVE = re.compile(r"^[a-zA-Z]:$")
+_HASH = re.compile(r"[0-9a-f]{64}")
+_DEVICE = re.compile(r"(?:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|(?:COM|LPT)[1-9¹²³])", re.I | re.ASCII)
+_UNSAFE_CHAR = re.compile(r'[\x00-\x1f\ud800-\udfff\\<>:"|?*]')
+_EMPTY_HASH = hashlib.sha256(b"").hexdigest()
 
 
 def validate_path(p: str) -> None:
-    if not isinstance(p, str) or not p or "\\" in p or "\0" in p:
+    if not isinstance(p, str) or not p or len(p.encode("utf-8", "surrogatepass")) > 1024 or _UNSAFE_CHAR.search(p):
         raise QentimArtError("unsafe path %r" % (p,))
     segs = p.split("/")
     if segs[0].lower() == STATE_DIR:
         raise QentimArtError("unsafe path %r" % p)
     for s in segs:
-        if not s or s in (".", "..") or _DRIVE.match(s):
+        if not s or s.endswith((".", " ")) or _DEVICE.fullmatch(s.partition(".")[0].rstrip(" ")):
             raise QentimArtError("unsafe path %r" % p)
 
 
@@ -144,26 +183,52 @@ def diff_manifests(a: "Manifest", b: "Manifest") -> dict:
 
 
 def parse_manifest(gz: bytes) -> Manifest:
+    if len(gz) > MAX_MANIFEST_GZ:
+        raise QentimArtError("compressed manifest exceeds size limit", code="ETOOBIG")
     try:
-        doc = json.loads(gzip.decompress(gz).decode("utf-8"))
-    except Exception as e:
+        doc = json.loads(gunzip_capped(gz, MAX_MANIFEST_RAW).decode("utf-8"))
+    except (ValueError, OSError, EOFError, zlib.error, RecursionError) as e:
         raise QentimArtError("invalid manifest: %s" % e)
-    if doc.get("formatVersion") != 1:
-        raise QentimArtError("unsupported manifest formatVersion %r" % doc.get("formatVersion"))
+    if (not isinstance(doc, dict) or type(doc.get("formatVersion")) is not int or doc["formatVersion"] != 1
+            or not isinstance(doc.get("files"), list) or not isinstance(doc.get("version"), str)):
+        raise QentimArtError("invalid manifest header", code="ECORRUPT")
     files: Dict[str, ManifestFile] = {}
+    names = set()
+    dirs = set()
+    sizes: Dict[str, int] = {}
     for f in doc["files"]:
-        path, size, fh = f["path"], int(f["size"]), f["hash"]
+        if not isinstance(f, dict):
+            raise QentimArtError("invalid file record", code="ECORRUPT")
+        path, size, fh = f.get("path"), f.get("size"), f.get("hash")
         validate_path(path)
+        key = path.lower()
+        if key in names or key in dirs:
+            raise QentimArtError("conflicting manifest path %s" % path, code="ECORRUPT")
+        names.add(key)
+        parent = key.rpartition("/")[0]
+        while parent:
+            if parent in names:
+                raise QentimArtError("conflicting manifest path %s" % path, code="ECORRUPT")
+            dirs.add(parent)
+            parent = parent.rpartition("/")[0]
+        if (type(size) is not int or size < 0 or not isinstance(fh, str) or not _HASH.fullmatch(fh)
+                or (size == 0 and fh != _EMPTY_HASH)):
+            raise QentimArtError("invalid size or hash for %s" % path, code="ECORRUPT")
         raw_chunks = f.get("chunks")
+        if raw_chunks is not None and not isinstance(raw_chunks, list):
+            raise QentimArtError("invalid chunks for %s" % path, code="ECORRUPT")
         chunks: List[Chunk] = []
-        if raw_chunks:
-            off = 0
-            for h, sz in raw_chunks:
-                chunks.append(Chunk(h, int(sz), off))
-                off += int(sz)
-            if off != size:
-                raise QentimArtError("manifest: chunk sizes of %s do not add up" % path)
-        elif size > 0:
-            chunks.append(Chunk(fh, size, 0))
+        off = 0
+        for pair in raw_chunks or ([[fh, size]] if size else []):
+            if not isinstance(pair, list) or len(pair) != 2:
+                raise QentimArtError("invalid chunk reference for %s" % path, code="ECORRUPT")
+            h, sz = pair
+            if (not isinstance(h, str) or not _HASH.fullmatch(h) or type(sz) is not int
+                    or not 0 < sz <= MAX_CHUNK_SIZE or sizes.setdefault(h, sz) != sz):
+                raise QentimArtError("invalid chunk for %s" % path, code="ECORRUPT")
+            chunks.append(Chunk(h, sz, off))
+            off += sz
+        if off != size or (len(chunks) == 1 and fh != chunks[0].hash):
+            raise QentimArtError("inconsistent file record for %s" % path, code="ECORRUPT")
         files[path] = ManifestFile(path, size, fh, chunks)
     return Manifest(doc.get("version", ""), doc.get("createdAt", ""), files)

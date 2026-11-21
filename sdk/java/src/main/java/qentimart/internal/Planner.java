@@ -3,6 +3,7 @@ package qentimart.internal;
 import qentimart.Chunk;
 import qentimart.Manifest;
 import qentimart.ManifestFile;
+import qentimart.QentimArtException;
 import qentimart.internal.LocalFs.LocalFile;
 
 import java.io.IOException;
@@ -11,6 +12,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -52,6 +54,7 @@ public final class Planner {
         public boolean deleteUntrackedOnFirstSync;
         public Map<String, LocalFile> files;
         public Set<String> dirs;
+        public Set<String> special;
         public Manifest old;            // 可空
         public Map<String, Long> tracked;
         public boolean hasState;
@@ -101,7 +104,7 @@ public final class Planner {
             LocalFile l = (LocalFile) item[1];
             String h;
             try {
-                h = LocalFs.hashFile(ctx.root.resolve(t.path()));
+                h = LocalFs.hashFile(ctx.root, t.path());
             } catch (IOException e) {
                 h = "";
             }
@@ -132,8 +135,8 @@ public final class Planner {
                 plan.toDelete.add(p);
                 continue;
             }
-            // 该文件是否属于 SDK 受管范围：曾记录在状态里，或存在于旧清单中。
-            boolean managed = ctx.tracked.containsKey(p) || old.containsKey(p);
+            // mtime 缓存只用于优化哈希检查。只有旧清单中的文件才是受管文件。
+            boolean managed = old.containsKey(p);
             if (policy.equals("overwrite")) {
                 if (managed) {
                     // 受管但本地有改动：overwrite 语义为「以服务端为准还原」，服务端已无此文件 → 删除。
@@ -151,6 +154,24 @@ public final class Planner {
             }
         }
 
+        Set<String> protectedPaths = new HashSet<>(plan.kept);
+        protectedPaths.addAll(plan.conflicts);
+        protectedPaths.addAll(ctx.special);
+        Set<String> protectedDirs = new HashSet<>();
+        for (String p : protectedPaths) {
+            for (int i = p.indexOf('/'); i >= 0; i = p.indexOf('/', i + 1)) protectedDirs.add(p.substring(0, i));
+        }
+        plan.toWrite.removeIf(w -> {
+            String p = w.t.path();
+            boolean blocked = protectedDirs.contains(p) || protectedPaths.contains(p);
+            for (int i = p.indexOf('/'); i >= 0; i = p.indexOf('/', i + 1)) {
+                String parent = p.substring(0, i);
+                if (ctx.special.contains(parent)) throw new QentimArtException("unsafe path " + p, -1, "EUNSAFE");
+                blocked |= protectedPaths.contains(parent);
+            }
+            if (blocked) (policy.equals("keep") ? plan.kept : plan.conflicts).add(p);
+            return blocked;
+        });
         plan.toWrite.sort(Comparator.comparing(w -> w.t.path()));
         Collections.sort(plan.toDelete);
         Collections.sort(plan.kept);

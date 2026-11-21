@@ -87,9 +87,23 @@ def main():
         with open(os.path.join(dest, victim)) as f:
             kept_ok = f.read() == "locally edited"
         check(len(r["files"]["kept"]) == 2 and kept_ok, "local_changes='keep' preserves local edits")
-        c.sync(dest)
-        check(tree(dest) == tree2, "local_changes='overwrite' (default) restores 1.1.0 and removes extra files")
+        r = c.sync(dest)
+        with open(os.path.join(dest, "ui", "untracked-by-user.txt")) as f:
+            check("ui/untracked-by-user.txt" in r["files"]["kept"] and f.read() == "mine", "default overwrite preserves untracked files")
+        c.sync(dest, delete_untracked=True)
+        check(tree(dest) == tree2, "explicit untracked cleanup restores the exact 1.1.0 tree")
 
+        preserved = os.path.join(dest, "empty.txt", "local-notes.txt")
+        with open(preserved, "w") as f:
+            f.write("mine")
+        try:
+            c.sync(dest, version="1.0.0")
+            blocked = False
+        except SyncConflictError:
+            blocked = True
+        with open(preserved) as f:
+            check(blocked and f.read() == "mine", "downgrade preserves untracked contents of a directory replaced by a file")
+        os.remove(preserved)
         r = c.sync(dest, version="1.0.0")
         check(tree(dest) == tree1, "downgrade to 1.0.0 is byte-identical (downloaded %s, reused %s)" % (mib(r["bytes"]["downloaded_raw"]), mib(r["bytes"]["reused_local"])))
 

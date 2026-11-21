@@ -18,7 +18,7 @@ class SyncConflictError(QentimArtError):
     def __init__(self, conflicts: List[str]):
         head = ", ".join(conflicts[:10]) + (", ..." if len(conflicts) > 10 else "")
         super().__init__(
-            "%d locally modified/untracked file(s) block the sync (local_changes='fail'): %s" % (len(conflicts), head),
+            "%d locally modified/untracked path(s) block the sync: %s" % (len(conflicts), head),
             code="ECONFLICT",
         )
         self.conflicts = conflicts

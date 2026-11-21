@@ -7,7 +7,7 @@ QentimArt 的 Java 下游客户端，只用 JDK 标准库，无第三方依赖�
 ## 构建
 
 ```bash
-cd sdk/java && ./gradlew build
+cd sdk/java && sh ./gradlew build
 ```
 
 产物在 `build/libs/` 下，包含带 CLI 入口的 `qentimart-sdk-0.1.0.jar` 和源码包 `qentimart-sdk-0.1.0-sources.jar`。Maven 坐标：`io.qentimart:qentimart-sdk:0.1.0`。
@@ -80,4 +80,4 @@ java -jar build/libs/qentimart-sdk-0.1.0.jar status --dir ./assets --server http
 java -jar build/libs/qentimart-sdk-0.1.0.jar report --dir ./assets
 ```
 
-执行 `./gradlew installDist` 后也可以直接跑 `build/install/qentimart-java/bin/qentimart-java`。支持 `sync`、`plan`、`status`、`verify`、`versions`、`report`，参数和环境变量（`QENTIMART_SERVER`、`QENTIMART_PROJECT`、`QENTIMART_TOKEN`、`QENTIMART_BASE_URL`）与 Node.js、Python SDK 一致。
+执行 `sh ./gradlew installDist` 后也可以直接跑 `build/install/qentimart-java/bin/qentimart-java`。支持 `sync`、`plan`、`status`、`verify`、`versions`、`report`，参数和环境变量（`QENTIMART_SERVER`、`QENTIMART_PROJECT`、`QENTIMART_TOKEN`、`QENTIMART_BASE_URL`）与 Node.js、Python SDK 一致。

@@ -53,8 +53,12 @@ type Result struct {
 
 type fileJob struct {
 	rel  string
-	abs  string
+	root *os.Root
 	size int64
+}
+
+func (f fileJob) open() (*os.File, error) {
+	return f.root.Open(filepath.FromSlash(f.rel))
 }
 
 type chunkLoc struct {
@@ -93,14 +97,12 @@ func excluded(rel string, patterns []string) bool {
 	return false
 }
 
-func scan(dir string, excludes []string) ([]fileJob, error) {
+func scan(dir *os.Root, excludes []string) ([]fileJob, error) {
 	var out []fileJob
-	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+	err := fs.WalkDir(dir.FS(), ".", func(rel string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		rel, _ := filepath.Rel(dir, p)
-		rel = filepath.ToSlash(rel)
 		if rel == "." {
 			return nil
 		}
@@ -120,7 +122,7 @@ func scan(dir string, excludes []string) ([]fileJob, error) {
 		if err != nil {
 			return err
 		}
-		out = append(out, fileJob{rel: rel, abs: p, size: info.Size()})
+		out = append(out, fileJob{rel: rel, root: dir, size: info.Size()})
 		return nil
 	})
 	sort.Slice(out, func(i, j int) bool { return out[i].rel < out[j].rel })
@@ -156,9 +158,9 @@ type chunkResult struct {
 }
 
 // chunkTree 扫描 opts.Dir，并行做 FastCDC 分块 + SHA-256，构建 manifest。
-func chunkTree(opts Options) (*chunkResult, error) {
+func chunkTree(dir *os.Root, opts Options) (*chunkResult, error) {
 	start := time.Now()
-	files, err := scan(opts.Dir, opts.Excludes)
+	files, err := scan(dir, opts.Excludes)
 	if err != nil {
 		return nil, fmt.Errorf("scan: %w", err)
 	}
@@ -239,7 +241,12 @@ func Run(ctx context.Context, c *Client, opts Options) (*Result, error) {
 	if err := opts.normalize(); err != nil {
 		return nil, err
 	}
-	ck, err := chunkTree(opts)
+	dir, err := os.OpenRoot(opts.Dir)
+	if err != nil {
+		return nil, err
+	}
+	defer dir.Close()
+	ck, err := chunkTree(dir, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -293,7 +300,7 @@ func Run(ctx context.Context, c *Client, opts Options) (*Result, error) {
 
 func chunkFile(f fileJob, p cdc.Params, buf []byte) (manifest.File, error) {
 	e := manifest.File{Path: f.rel}
-	fh, err := os.Open(f.abs)
+	fh, err := f.open()
 	if err != nil {
 		return e, err
 	}
@@ -332,14 +339,27 @@ func findMissing(ctx context.Context, c *Client, all []wire.Hash) ([]wire.Hash, 
 		if err != nil {
 			return nil, err
 		}
-		b, err := io.ReadAll(resp.Body)
+		b, err := io.ReadAll(io.LimitReader(resp.Body, int64(len(body))+1))
 		resp.Body.Close()
 		if err != nil {
 			return nil, err
 		}
+		if len(b) > len(body) {
+			return nil, errors.New("missing response exceeds requested hash count")
+		}
 		hs, err := wire.ParseHashList(b)
 		if err != nil {
 			return nil, err
+		}
+		requested := make(map[wire.Hash]struct{}, j-i)
+		for _, h := range all[i:j] {
+			requested[h] = struct{}{}
+		}
+		for _, h := range hs {
+			if _, ok := requested[h]; !ok {
+				return nil, errors.New("missing response contains an unexpected or duplicate hash")
+			}
+			delete(requested, h)
 		}
 		out = append(out, hs...)
 	}
@@ -420,7 +440,9 @@ func upload(ctx context.Context, c *Client, files []fileJob, locs map[wire.Hash]
 func uploadBatch(ctx context.Context, c *Client, files []fileJob, locs map[wire.Hash]chunkLoc, batch []wire.Hash, compress string, done, wireBytes *int64) error {
 	pr, pw := io.Pipe()
 	var sent int64
+	finished := make(chan struct{})
 	go func() {
+		defer close(finished)
 		var open *os.File
 		openIdx := -1
 		defer func() {
@@ -436,7 +458,7 @@ func uploadBatch(ctx context.Context, c *Client, files []fileJob, locs map[wire.
 				if open != nil {
 					open.Close()
 				}
-				f, err := os.Open(files[l.file].abs)
+				f, err := files[l.file].open()
 				if err != nil {
 					pw.CloseWithError(err)
 					return
@@ -472,6 +494,7 @@ func uploadBatch(ctx context.Context, c *Client, files []fileJob, locs map[wire.
 	}()
 	resp, err := c.Do(ctx, "POST", "/chunks", pr, "application/x-qentimart-frames")
 	pr.CloseWithError(errors.New("request finished"))
+	<-finished
 	if err != nil {
 		return err
 	}

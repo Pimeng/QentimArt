@@ -7,7 +7,7 @@
 服务端按块去重存储，下游不留缓存目录、只拉取变更数据
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-![Go](https://img.shields.io/badge/Go-%E2%89%A51.23-00ADD8?logo=go&logoColor=white)
+![Go](https://img.shields.io/badge/Go-%E2%89%A51.27.4-00ADD8?logo=go&logoColor=white)
 ![Node.js](https://img.shields.io/badge/Node.js-%E2%89%A518-339933?logo=nodedotjs&logoColor=white)
 ![Python](https://img.shields.io/badge/Python-%E2%89%A53.8-3776AB?logo=python&logoColor=white)
 ![Java](https://img.shields.io/badge/Java-%E2%89%A521-ED8B00?logo=openjdk&logoColor=white)

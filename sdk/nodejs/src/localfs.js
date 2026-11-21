@@ -1,8 +1,44 @@
 import fs from 'node:fs/promises';
-import { createReadStream } from 'node:fs';
-import { createHash } from 'node:crypto';
+import { constants } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { STATE_DIR } from './manifest.js';
+import { QentimArtError, readCapped } from './http.js';
+
+export async function stateDirectory(dir, create = false) {
+  const sd = path.join(dir, STATE_DIR);
+  if (create) await fs.mkdir(sd, { recursive: true, mode: 0o700 });
+  const st = await fs.lstat(sd).catch((err) => {
+    if (err.code !== 'ENOENT') throw err;
+  });
+  if (st && !st.isDirectory()) throw new QentimArtError('unsafe state directory', { code: 'EUNSAFE' });
+  return sd;
+}
+
+export async function openRegularFile(file) {
+  const st = await fs.lstat(file);
+  if (!st.isFile()) throw new QentimArtError('unsafe file type', { code: 'EUNSAFE' });
+  const flags = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0);
+  const fh = await fs.open(file, flags);
+  try {
+    if (!(await fh.stat()).isFile()) throw new QentimArtError('unsafe file type', { code: 'EUNSAFE' });
+    return fh;
+  } catch (err) {
+    await fh.close();
+    throw err;
+  }
+}
+
+export async function readRegularFile(file, maxBytes, encoding) {
+  const fh = await openRegularFile(file);
+  try {
+    if ((await fh.stat()).size > maxBytes) throw new QentimArtError('state file exceeds size limit', { code: 'ETOOLARGE' });
+    const data = await readCapped(fh.createReadStream(), maxBytes);
+    return encoding ? data.toString(encoding) : data;
+  } finally {
+    await fh.close();
+  }
+}
 
 /** 对 items 逐个执行 fn，同时进行中的任务最多 n 个。 */
 export async function pool(items, n, fn) {
@@ -30,6 +66,7 @@ export async function pool(items, n, fn) {
 export async function scanDir(dir) {
   const out = new Map();
   const dirs = new Set();
+  const other = new Set();
   const walk = async (abs, rel) => {
     let entries;
     try {
@@ -42,9 +79,10 @@ export async function scanDir(dir) {
     const subdirs = [];
     for (const e of entries) {
       const r = rel ? `${rel}/${e.name}` : e.name;
-      if (!rel && e.name === STATE_DIR) continue;
+      if (!rel && e.name.toLowerCase() === STATE_DIR) continue;
       if (e.isDirectory()) subdirs.push([path.join(abs, e.name), r]);
       else if (e.isFile()) files.push([path.join(abs, e.name), r]);
+      else other.add(r);
     }
     await pool(files, 64, async ([a, r]) => {
       const st = await fs.stat(a);
@@ -56,24 +94,34 @@ export async function scanDir(dir) {
     }
   };
   await walk(dir, '');
-  return { files: out, dirs };
+  return { files: out, dirs, other };
 }
 
 /** 以流式方式计算文件的 SHA-256。 */
-export function hashFile(abs) {
-  return new Promise((resolve, reject) => {
+export async function hashFile(abs) {
+  const fh = await openRegularFile(abs);
+  try {
     const h = createHash('sha256');
-    const s = createReadStream(abs, { highWaterMark: 1 << 20 });
-    s.on('data', (c) => h.update(c));
-    s.on('error', reject);
-    s.on('end', () => resolve(h.digest('hex')));
-  });
+    for await (const c of fh.createReadStream({ highWaterMark: 1 << 20 })) h.update(c);
+    return h.digest('hex');
+  } finally {
+    await fh.close();
+  }
 }
 
 export async function writeFileAtomic(target, data) {
-  const tmp = `${target}.${process.pid}.tmp`;
-  await fs.writeFile(tmp, data);
-  await renameRetry(tmp, target);
+  const tmp = `${target}.${randomUUID()}.tmp`;
+  const fh = await fs.open(tmp, 'wx', 0o600);
+  try {
+    try {
+      await fh.writeFile(data);
+    } finally {
+      await fh.close();
+    }
+    await renameRetry(tmp, target);
+  } finally {
+    await fs.rm(tmp, { force: true });
+  }
 }
 
 /** 带重试的 rename，用于应对 Windows 上短暂的共享冲突。 */

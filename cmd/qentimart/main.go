@@ -146,6 +146,7 @@ func cmdPublish(ctx context.Context, args []string) error {
 		if backend, err = storage.NewLocal(*outDir); err != nil {
 			return err
 		}
+		defer backend.Close()
 		res, err = publish.RunStatic(ctx, backend, *cf.project, opts)
 	} else {
 		var c *publish.Client
@@ -182,10 +183,11 @@ func cmdSimple(ctx context.Context, args []string, what string) error {
 		if err != nil {
 			return err
 		}
+		defer backend.Close()
 		var out any
 		switch what {
 		case "versions":
-			b, err := storage.ReadAll(ctx, backend, catalog.IndexKey)
+			b, err := storage.ReadAll(ctx, backend, catalog.IndexKey, catalog.MaxJSONBytes)
 			if err != nil {
 				return err
 			}

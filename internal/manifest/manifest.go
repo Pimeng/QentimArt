@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -33,8 +34,13 @@ import (
 
 const FormatVersion = 1
 
+const MaxCompressedBytes = 256 << 20
+const MaxRawBytes = 1 << 30
+
 // StateDir 是为每个客户端保留的状态目录名。
 const StateDir = ".qentimart"
+
+var deviceName = regexp.MustCompile(`(?i)^(CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|(?:COM|LPT)[1-9¹²³])$`)
 
 // ChunkRef 引用文件中的一个块。
 type ChunkRef struct {
@@ -133,6 +139,9 @@ func Encode(m *Manifest) ([]byte, error) {
 	if err := zw.Close(); err != nil {
 		return nil, err
 	}
+	if buf.Len() > MaxCompressedBytes {
+		return nil, errors.New("manifest: compressed size exceeds limit")
+	}
 	return buf.Bytes(), nil
 }
 
@@ -142,13 +151,24 @@ func Decode(gz []byte, maxBytes int64) (*Manifest, error) {
 	if err != nil {
 		return nil, fmt.Errorf("manifest: %w", err)
 	}
-	dec := json.NewDecoder(io.LimitReader(zr, maxBytes))
+	defer zr.Close()
+	limited := &io.LimitedReader{R: zr, N: maxBytes + 1}
+	dec := json.NewDecoder(limited)
 	var jm jsonManifest
 	if err := dec.Decode(&jm); err != nil {
 		return nil, fmt.Errorf("manifest: %w", err)
 	}
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, errors.New("manifest: invalid trailing data or gzip checksum")
+	}
+	if limited.N == 0 {
+		return nil, errors.New("manifest: decompressed size exceeds limit")
+	}
 	if jm.FormatVersion != FormatVersion {
 		return nil, fmt.Errorf("manifest: unsupported formatVersion %d", jm.FormatVersion)
+	}
+	if jm.Files == nil {
+		return nil, errors.New("manifest: files must be an array")
 	}
 	m := &Manifest{Version: jm.Version, CreatedAt: jm.CreatedAt, Files: make([]File, len(jm.Files))}
 	for i, jf := range jm.Files {
@@ -172,6 +192,8 @@ func Decode(gz []byte, maxBytes int64) (*Manifest, error) {
 func (m *Manifest) Validate() error {
 	seen := make(map[string]string, len(m.Files))
 	dirs := make(map[string]bool)
+	sizes := make(map[wire.Hash]int64)
+	emptyHash := wire.Sum(nil)
 	for i, f := range m.Files {
 		if err := ValidatePath(f.Path); err != nil {
 			return err
@@ -190,15 +212,25 @@ func (m *Manifest) Validate() error {
 		if f.Size < 0 {
 			return fmt.Errorf("manifest: %q negative size", f.Path)
 		}
+		if f.Size == 0 && f.Hash != emptyHash {
+			return fmt.Errorf("manifest: %q has an invalid hash for an empty file", f.Path)
+		}
 		var sum int64
 		for _, c := range f.Chunks {
 			if c.Size <= 0 || c.Size > wire.MaxChunkSize {
 				return fmt.Errorf("manifest: %q has invalid chunk size %d", f.Path, c.Size)
 			}
+			if size, ok := sizes[c.Hash]; ok && size != c.Size {
+				return fmt.Errorf("manifest: %q has an inconsistent size for chunk %s", f.Path, c.Hash)
+			}
+			sizes[c.Hash] = c.Size
 			sum += c.Size
 		}
 		if sum != f.Size {
 			return fmt.Errorf("manifest: %q chunk sizes (%d) != file size (%d)", f.Path, sum, f.Size)
+		}
+		if len(f.Chunks) == 1 && f.Hash != f.Chunks[0].Hash {
+			return fmt.Errorf("manifest: %q must match the hash of its only chunk", f.Path)
 		}
 	}
 	for low, p := range seen {
@@ -232,6 +264,10 @@ func ValidatePath(p string) error {
 		}
 		if strings.HasSuffix(s, ".") || strings.HasSuffix(s, " ") {
 			return fmt.Errorf("path %q: segment ends with '.' or ' ' (not portable to Windows)", p)
+		}
+		base, _, _ := strings.Cut(s, ".")
+		if deviceName.MatchString(strings.TrimRight(base, " ")) {
+			return fmt.Errorf("path %q uses a reserved Windows device name", p)
 		}
 		for _, r := range s {
 			if r < 0x20 || strings.ContainsRune(`\<>:"|?*`, r) {

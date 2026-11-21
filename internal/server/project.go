@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"path"
 	"strings"
@@ -13,6 +14,7 @@ import (
 
 	"qentimart/internal/catalog"
 	"qentimart/internal/manifest"
+	"qentimart/internal/semver"
 	"qentimart/internal/storage"
 	"qentimart/internal/wire"
 )
@@ -94,8 +96,9 @@ func (s *Server) ensureChunks(ctx context.Context, p *project) error {
 	}
 	p.chunks = set
 	p.chunksLoaded = true
+	count := len(set)
 	p.mu.Unlock()
-	s.log.Printf("project %s: indexed %d chunks in %s", p.name, len(set), time.Since(start).Round(time.Millisecond))
+	s.log.Printf("project %s: indexed %d chunks in %s", p.name, count, time.Since(start).Round(time.Millisecond))
 	return nil
 }
 
@@ -136,11 +139,14 @@ func (s *Server) listVersions(ctx context.Context, p *project, force bool) (map[
 	for _, k := range keys {
 		// 复用已缓存的条目；元数据是不可变的。
 		v := path.Base(path.Dir(k))
+		if !semver.Valid(v) || metaKey(p.name, v) != k {
+			return nil, fmt.Errorf("unexpected version metadata key %q", k)
+		}
 		if old, ok := p.versions[v]; ok {
 			out[v] = old
 			continue
 		}
-		b, err := storage.ReadAll(ctx, s.store, k)
+		b, err := storage.ReadAll(ctx, s.store, k, catalog.MaxMetaBytes)
 		if errors.Is(err, storage.ErrNotFound) {
 			continue
 		}
@@ -151,7 +157,10 @@ func (s *Server) listVersions(ctx context.Context, p *project, force bool) (map[
 		if err := json.Unmarshal(b, &vi); err != nil {
 			return nil, fmt.Errorf("%s: %w", k, err)
 		}
-		out[vi.Version] = &vi
+		if vi.Version != v {
+			return nil, fmt.Errorf("version metadata does not match its key %q", k)
+		}
+		out[v] = &vi
 	}
 	p.versions = out
 	p.versionsAt = time.Now()
@@ -161,6 +170,8 @@ func (s *Server) listVersions(ctx context.Context, p *project, force bool) (map[
 func (p *project) setVersion(vi *VersionInfo) {
 	p.vmu.Lock()
 	if p.versions != nil {
+		// listVersions 的调用者可能还在遍历旧快照。
+		p.versions = maps.Clone(p.versions)
 		p.versions[vi.Version] = vi
 	}
 	p.vmu.Unlock()
@@ -168,6 +179,7 @@ func (p *project) setVersion(vi *VersionInfo) {
 
 func (p *project) dropVersion(v string) {
 	p.vmu.Lock()
+	p.versions = maps.Clone(p.versions)
 	delete(p.versions, v)
 	p.vmu.Unlock()
 }
@@ -259,7 +271,7 @@ func (s *Server) loadManifest(ctx context.Context, p *project, v string, parse b
 	if c := s.mcache.get(k); c != nil && (!parse || c.m != nil) {
 		return c, nil
 	}
-	gz, err := storage.ReadAll(ctx, s.store, manifestKey(p.name, v))
+	gz, err := storage.ReadAll(ctx, s.store, manifestKey(p.name, v), manifest.MaxCompressedBytes)
 	if errors.Is(err, storage.ErrNotFound) {
 		return nil, errNotFound("manifest for " + v + " not found")
 	}
@@ -268,7 +280,7 @@ func (s *Server) loadManifest(ctx context.Context, p *project, v string, parse b
 	}
 	c := &cachedManifest{gz: gz}
 	if parse {
-		if c.m, err = manifest.Decode(gz, maxManifestBytes); err != nil {
+		if c.m, err = manifest.Decode(gz, manifest.MaxRawBytes); err != nil {
 			return nil, err
 		}
 	}

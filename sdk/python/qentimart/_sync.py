@@ -9,8 +9,8 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Set
 
-from ._errors import QentimArtError
-from ._localfs import RandomAccessFile, mtime_ms, prune_empty_dirs, replace_retry, run_pool
+from ._errors import QentimArtError, SyncConflictError
+from ._localfs import RandomAccessFile, asset_path, check_entry, hash_file, is_link, mtime_ms, prune_empty_dirs, replace_retry, run_pool
 from ._plan import Plan, SourceIndex, WriteTask
 from ._wire import STATE_DIR
 from ._state import TMP_DIR
@@ -53,12 +53,14 @@ def _waves(tasks: List[WriteTask], max_bytes: int, max_files: int) -> List[List[
     return out
 
 
-def apply_writes(client: Any, root: str, policy: str, plan: Plan, sources: SourceIndex, stats: Stats,
+def apply_writes(client: Any, root: str, plan: Plan, sources: SourceIndex, stats: Stats,
                  new_tracked: Dict[str, int], write_bytes: int, progress: Callable[..., None],
                  cancel: Optional[threading.Event]) -> None:
     tmp_dir = os.path.join(root, STATE_DIR, TMP_DIR)
-    shutil.rmtree(tmp_dir, ignore_errors=True)
-    os.makedirs(tmp_dir, exist_ok=True)
+    check_entry(tmp_dir, directory=True)
+    if os.path.isdir(tmp_dir):
+        shutil.rmtree(tmp_dir)
+    os.mkdir(tmp_dir, 0o700)
     delete_set: Set[str] = set(plan.to_delete)
     seq = 0
     for wave in _waves(plan.to_write, client.wave_bytes, client.wave_files):
@@ -69,7 +71,7 @@ def apply_writes(client: Any, root: str, policy: str, plan: Plan, sources: Sourc
             seq += 1
         handles: List[Optional[RandomAccessFile]] = [None] * len(wave)
         try:
-            _apply_wave(client, root, policy, wave, tmps, handles, sources, stats, new_tracked,
+            _apply_wave(client, root, wave, tmps, handles, sources, stats, new_tracked,
                         write_bytes, progress, cancel, delete_set)
         finally:
             for h in handles:
@@ -77,7 +79,7 @@ def apply_writes(client: Any, root: str, policy: str, plan: Plan, sources: Sourc
                     h.close()
 
 
-def _apply_wave(client, root, policy, wave, tmps, handles, sources, stats, new_tracked,
+def _apply_wave(client, root, wave, tmps, handles, sources, stats, new_tracked,
                 write_bytes, progress, cancel, delete_set) -> None:
     def open_tmp(i: int) -> None:
         handles[i] = RandomAccessFile(tmps[i], write=True, size=wave[i].t.size)
@@ -93,6 +95,8 @@ def _apply_wave(client, root, policy, wave, tmps, handles, sources, stats, new_t
             n.dests.append((handles[i], c.offset))
 
     def write_chunk(n: _Need, data: bytes) -> None:
+        if len(data) != n.size:
+            raise QentimArtError("chunk length does not match manifest", code="ECORRUPT")
         for fh, off in n.dests:
             fh.write_at(off, data)
         with stats.lock:
@@ -108,8 +112,10 @@ def _apply_wave(client, root, policy, wave, tmps, handles, sources, stats, new_t
         with readers_lock:
             if p not in readers:
                 try:
-                    readers[p] = RandomAccessFile(os.path.join(root, p), write=False)
-                except OSError:
+                    path = asset_path(root, p)
+                    check_entry(path, directory=False)
+                    readers[p] = RandomAccessFile(path, write=False)
+                except (OSError, QentimArtError):
                     readers[p] = None
             return readers[p]
 
@@ -119,6 +125,8 @@ def _apply_wave(client, root, policy, wave, tmps, handles, sources, stats, new_t
     def try_local(item) -> None:
         h, n = item
         for s in sources.candidates(h):
+            if s.size != n.size:
+                continue
             fh = reader(s.path)
             if fh is None:
                 continue
@@ -156,10 +164,15 @@ def _apply_wave(client, root, policy, wave, tmps, handles, sources, stats, new_t
         handles[i].close()
         handles[i] = None
     for i, w in enumerate(wave):
-        target = os.path.join(root, w.t.path)
-        _ensure_parent(root, w.t.path, delete_set, policy)
+        if len(w.t.chunks) > 1 and hash_file(tmps[i]) != w.t.hash:
+            raise QentimArtError("file %s failed verification" % w.t.path, code="ECORRUPT")
+    for i, w in enumerate(wave):
+        _ensure_parent(root, w.t.path, delete_set)
+        target = asset_path(root, w.t.path)
+        if w.reason == "create" and os.path.lexists(target):
+            raise SyncConflictError([w.t.path])
         if w.reason == "replace-dir":
-            shutil.rmtree(target, ignore_errors=True)
+            _remove_replaced_dir(root, w.t.path, delete_set)
         try:
             replace_retry(tmps[i], target)
         except OSError as e:
@@ -168,7 +181,33 @@ def _apply_wave(client, root, policy, wave, tmps, handles, sources, stats, new_t
         sources.replaced(w.t.path, w.t.chunks)
 
 
-def _ensure_parent(root: str, rel: str, delete_set: Set[str], policy: str) -> None:
+def _remove_replaced_dir(root: str, rel: str, delete_set: Set[str]) -> None:
+    # 先检查整个子树，再仅移除规划中允许删除的文件；新出现的条目会让 rmdir 安全失败。
+    files = []
+    dirs = []
+    pending = [rel]
+    while pending:
+        subdir = pending.pop()
+        path = os.path.join(root, subdir)
+        check_entry(path, directory=True)
+        dirs.append(path)
+        with os.scandir(path) as entries:
+            for e in entries:
+                child = subdir + "/" + e.name
+                st = e.stat(follow_symlinks=False)
+                if not is_link(st) and stat.S_ISDIR(st.st_mode):
+                    pending.append(child)
+                elif not is_link(st) and stat.S_ISREG(st.st_mode) and child in delete_set:
+                    files.append(e.path)
+                else:
+                    raise QentimArtError("preserved entry blocks replacement: %s" % child, code="ECONFLICT")
+    for path in files:
+        os.unlink(path)
+    for path in reversed(dirs):
+        os.rmdir(path)
+
+
+def _ensure_parent(root: str, rel: str, delete_set: Set[str]) -> None:
     """逐段创建父目录，绝不跟随符号链接：若某个已存在的祖先是符号链接，拒绝写入，
     以免清单路径合法但本地父目录指向 root 之外时，替换操作把文件写到 root 外（逃逸）。"""
     parent = rel.rsplit("/", 1)[0] if "/" in rel else ""
@@ -177,16 +216,16 @@ def _ensure_parent(root: str, rel: str, delete_set: Set[str], policy: str) -> No
     segs = parent.split("/")
     for i in range(1, len(segs) + 1):
         p = "/".join(segs[:i])
-        ap = os.path.join(root, p)
+        ap = asset_path(root, p) if os.name == "nt" and "~" in p else os.path.join(root, p)
         try:
             st = os.lstat(ap)
         except FileNotFoundError:
             st = None
-        if st is not None and stat.S_ISLNK(st.st_mode):
+        if st is not None and is_link(st):
             raise QentimArtError("unsafe path %s: %r is a symlink" % (rel, p), code="EUNSAFE")
         if st is not None and not stat.S_ISDIR(st.st_mode):
             # 该位置是普通文件，但需要它是目录（例如 "a" -> "a/b"）。
-            if p not in delete_set and policy != "overwrite":
+            if p not in delete_set or not stat.S_ISREG(st.st_mode):
                 raise QentimArtError("%s is a file but %s needs it to be a directory" % (p, rel))
             os.remove(ap)
             delete_set.discard(p)
@@ -201,8 +240,9 @@ def delete_files(root: str, paths: List[str]) -> None:
         ap = os.path.join(root, p)
         try:
             st = os.lstat(ap)  # 不跟随符号链接
-        except FileNotFoundError:
+        except (FileNotFoundError, NotADirectoryError):
             continue
+        asset_path(root, p)
         # 真实目录（已变为目标版本中的目录，文件 -> 目录）跳过；符号链接按条目本身删除。
         if stat.S_ISDIR(st.st_mode):
             continue

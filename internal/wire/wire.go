@@ -30,6 +30,8 @@ const (
 	FrameHeaderLen = 41
 	BlobHeaderLen  = 5
 	MaxChunkSize   = 16 << 20
+	maxStoredSize  = MaxChunkSize + 1024
+	MaxBlobSize    = BlobHeaderLen + maxStoredSize
 
 	EncRaw     byte = 0
 	EncDeflate byte = 1
@@ -102,24 +104,41 @@ func ReadFrameHeader(r io.Reader) (FrameHeader, error) {
 	f.Enc = b[32]
 	f.RawLen = binary.BigEndian.Uint32(b[33:])
 	f.StoredLen = binary.BigEndian.Uint32(b[37:])
-	if f.Enc != EncMissing && (f.RawLen > MaxChunkSize || f.StoredLen > MaxChunkSize+1024) {
-		return FrameHeader{}, fmt.Errorf("frame too large (%d/%d)", f.RawLen, f.StoredLen)
+	if f.Enc == EncMissing {
+		if f.RawLen != 0 || f.StoredLen != 0 {
+			return FrameHeader{}, errors.New("missing frame must have zero lengths")
+		}
+	} else if err := validateLengths(f.Enc, f.RawLen, int64(f.StoredLen)); err != nil {
+		return FrameHeader{}, err
 	}
 	return f, nil
+}
+
+func validateLengths(enc byte, rawLen uint32, storedLen int64) error {
+	if rawLen > MaxChunkSize || storedLen > maxStoredSize {
+		return fmt.Errorf("chunk too large (%d/%d)", rawLen, storedLen)
+	}
+	switch enc {
+	case EncRaw:
+		if storedLen != int64(rawLen) {
+			return errors.New("raw length mismatch")
+		}
+	case EncDeflate:
+	default:
+		return fmt.Errorf("unknown encoding %d", enc)
+	}
+	return nil
 }
 
 var flateReaders = sync.Pool{}
 
 // Decode 返回 payload 对应的原始块字节，并校验其哈希。
 func Decode(enc byte, rawLen uint32, payload []byte, want Hash) ([]byte, error) {
-	var raw []byte
-	switch enc {
-	case EncRaw:
-		if uint32(len(payload)) != rawLen {
-			return nil, errors.New("raw length mismatch")
-		}
-		raw = payload
-	case EncDeflate:
+	if err := validateLengths(enc, rawLen, int64(len(payload))); err != nil {
+		return nil, err
+	}
+	raw := payload
+	if enc == EncDeflate {
 		raw = make([]byte, rawLen)
 		br := bytes.NewReader(payload)
 		var fr io.ReadCloser
@@ -134,16 +153,19 @@ func Decode(enc byte, rawLen uint32, payload []byte, want Hash) ([]byte, error) 
 		_, err := io.ReadFull(fr, raw)
 		if err == nil {
 			var one [1]byte
-			if n, _ := fr.Read(one[:]); n != 0 {
+			n, end := io.ReadFull(fr, one[:])
+			if n != 0 {
 				err = errors.New("deflate payload longer than rawLen")
+			} else if end != io.EOF {
+				err = end
+			} else if br.Len() != 0 {
+				err = errors.New("trailing bytes after deflate payload")
 			}
 		}
 		flateReaders.Put(fr)
 		if err != nil {
 			return nil, fmt.Errorf("deflate: %w", err)
 		}
-	default:
-		return nil, fmt.Errorf("unknown encoding %d", enc)
 	}
 	if Sum(raw) != want {
 		return nil, fmt.Errorf("chunk %s: hash mismatch", want)
@@ -182,5 +204,9 @@ func ParseBlob(b []byte) (enc byte, rawLen uint32, payload []byte, err error) {
 	if len(b) < BlobHeaderLen {
 		return 0, 0, nil, errors.New("blob too short")
 	}
-	return b[0], binary.BigEndian.Uint32(b[1:]), b[BlobHeaderLen:], nil
+	enc, rawLen, payload = b[0], binary.BigEndian.Uint32(b[1:]), b[BlobHeaderLen:]
+	if err := validateLengths(enc, rawLen, int64(len(payload))); err != nil {
+		return 0, 0, nil, err
+	}
+	return enc, rawLen, payload, nil
 }

@@ -353,7 +353,9 @@ async function main() {
     r = await client.sync(dst, { localChanges: 'keep' });
     check(r.files.kept.length === 2 && (await fs.readFile(path.join(dst, victim), 'utf8')) === 'locally edited', "localChanges='keep' preserves local edits");
     r = await client.sync(dst);
-    check(!sameTree(tree2, await treeHashes(dst)), "localChanges='overwrite' (default) restores 1.1.0 and removes extra files");
+    check(r.files.kept.includes('ui/untracked-by-user.txt') && (await fs.readFile(path.join(dst, 'ui/untracked-by-user.txt'), 'utf8')) === 'mine', 'default overwrite preserves untracked files');
+    await client.sync(dst, { deleteUntracked: true });
+    check(!sameTree(tree2, await treeHashes(dst)), 'explicit untracked cleanup restores the exact 1.1.0 tree');
 
     // 版本降级
     r = await client.sync(dst, { version: '1.0.0' });

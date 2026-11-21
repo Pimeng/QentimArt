@@ -57,6 +57,9 @@ func NewS3(c S3Config) (*S3, error) {
 	if err != nil {
 		return nil, err
 	}
+	if (u.Scheme != "https" && u.Scheme != "http") || u.Hostname() == "" || u.User != nil {
+		return nil, errors.New("s3: endpoint must be an HTTP(S) URL with a host and without credentials")
+	}
 	if u.Scheme != "https" && !c.AllowInsecureHTTP && !isLoopback(u.Hostname()) {
 		return nil, fmt.Errorf("s3: endpoint %q is not https; data and request bodies would be sent in plaintext. "+
 			`set "allowInsecureHTTP": true to override, or use a loopback address for local testing`, c.Endpoint)
@@ -69,7 +72,11 @@ func NewS3(c S3Config) (*S3, error) {
 		IdleConnTimeout:     90 * time.Second,
 		DisableCompression:  true,
 	}
-	return &S3{cfg: c, base: u, client: &http.Client{Transport: tr}}, nil
+	return &S3{cfg: c, base: u, client: &http.Client{
+		Transport: tr,
+		// SigV4 绑定原始请求的主机和路径，重定向也不能转发对象的内容。
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}}, nil
 }
 
 // isLoopback 判断主机名是否为回环地址（localhost 或回环 IP）。
@@ -82,6 +89,11 @@ func isLoopback(host string) bool {
 }
 
 func (s *S3) Parallelism() int { return s.cfg.Parallelism }
+
+func (s *S3) Close() error {
+	s.client.CloseIdleConnections()
+	return nil
+}
 
 func (s *S3) objectKey(key string) string {
 	if s.cfg.Prefix != "" {
@@ -198,21 +210,29 @@ func (s *S3) List(ctx context.Context, prefix string, fn func(ObjectInfo) error)
 			return err
 		}
 		var lr listResult
-		err = xml.NewDecoder(resp.Body).Decode(&lr)
+		const maxPageBytes = 16 << 20
+		page := &io.LimitedReader{R: resp.Body, N: maxPageBytes + 1}
+		err = xml.NewDecoder(page).Decode(&lr)
 		resp.Body.Close()
+		if page.N == 0 {
+			return errors.New("s3 list: response exceeds page size limit")
+		}
 		if err != nil {
 			return fmt.Errorf("s3 list: %w", err)
 		}
 		for _, c := range lr.Contents {
-			if len(c.Key) < strip {
-				continue
+			if !strings.HasPrefix(c.Key, full) {
+				return errors.New("s3 list: object outside requested prefix")
 			}
 			if err := fn(ObjectInfo{Key: c.Key[strip:], Size: c.Size, ModTime: c.LastModified}); err != nil {
 				return err
 			}
 		}
-		if !lr.IsTruncated || lr.NextContinuationToken == "" {
+		if !lr.IsTruncated {
 			return nil
+		}
+		if lr.NextContinuationToken == "" || lr.NextContinuationToken == token {
+			return errors.New("s3 list: invalid continuation token")
 		}
 		token = lr.NextContinuationToken
 	}

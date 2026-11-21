@@ -21,6 +21,7 @@ type ObjectInfo struct {
 
 // Backend 是一个扁平的键值 blob 存储。key 使用 "/" 作为分隔符。
 type Backend interface {
+	io.Closer
 	Get(ctx context.Context, key string) (io.ReadCloser, int64, error)
 	Put(ctx context.Context, key string, r io.Reader, size int64) error
 	Stat(ctx context.Context, key string) (ObjectInfo, error)
@@ -57,19 +58,25 @@ func Open(c Config) (Backend, error) {
 	return nil, fmt.Errorf("storage: unknown type %q", c.Type)
 }
 
-// ReadAll 完整读取一个对象。
-func ReadAll(ctx context.Context, b Backend, key string) ([]byte, error) {
+// ReadAll 完整读取一个对象，未知长度的响应也受 limit 限制。
+func ReadAll(ctx context.Context, b Backend, key string, limit int64) ([]byte, error) {
 	rc, size, err := b.Get(ctx, key)
 	if err != nil {
 		return nil, err
 	}
 	defer rc.Close()
-	if size >= 0 && size < 1<<30 {
-		buf := make([]byte, size)
-		if _, err := io.ReadFull(rc, buf); err != nil {
-			return nil, err
-		}
-		return buf, nil
+	if size > limit {
+		return nil, fmt.Errorf("storage: %s exceeds %d bytes", key, limit)
 	}
-	return io.ReadAll(rc)
+	buf, err := io.ReadAll(io.LimitReader(rc, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(buf)) > limit {
+		return nil, fmt.Errorf("storage: %s exceeds %d bytes", key, limit)
+	}
+	if size >= 0 && int64(len(buf)) != size {
+		return nil, fmt.Errorf("storage: %s length differs from declared size", key)
+	}
+	return buf, nil
 }

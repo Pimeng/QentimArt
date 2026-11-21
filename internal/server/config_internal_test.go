@@ -1,6 +1,10 @@
 package server
 
-import "testing"
+import (
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 // TestNormalizeRequiresTokens 确认无令牌时必须显式 insecureNoAuth 才能启动（#4）。
 func TestNormalizeRequiresTokens(t *testing.T) {
@@ -42,5 +46,36 @@ func TestNormalizeTokenValidation(t *testing.T) {
 	c = Config{Tokens: []TokenConfig{{Token: "0123456789abcdef0", Role: "read"}}}
 	if err := c.normalize(); err != nil {
 		t.Fatalf("valid token config rejected: %v", err)
+	}
+}
+
+func TestVersionSnapshotsRemainImmutable(t *testing.T) {
+	v1, v2 := &VersionInfo{Version: "1.0.0"}, &VersionInfo{Version: "2.0.0"}
+	first := map[string]*VersionInfo{v1.Version: v1}
+	p := &project{versions: first}
+	p.setVersion(v2)
+	second := p.versions
+	p.dropVersion(v1.Version)
+	if len(first) != 1 || first[v1.Version] != v1 || len(second) != 2 || p.versions[v1.Version] != nil {
+		t.Fatal("updating the project modified a previous version snapshot")
+	}
+}
+
+func TestExampleConfigsRequireFreshTokens(t *testing.T) {
+	for _, name := range []string{"server.json", "server.s3.json"} {
+		if _, err := LoadConfig(filepath.Join("..", "..", "examples", name)); err == nil || !strings.Contains(err.Error(), "placeholder") {
+			t.Errorf("loading %s: want a placeholder credential error, got %v", name, err)
+		}
+	}
+}
+
+func TestDuplicateCredentialRejected(t *testing.T) {
+	const credential = "0123456789abcdef0"
+	cfg := Config{Tokens: []TokenConfig{
+		{Token: credential, Role: "read", Projects: []string{"game"}},
+		{Token: credential, Role: "admin", Projects: []string{"*"}},
+	}}
+	if err := cfg.normalize(); err == nil || strings.Contains(err.Error(), credential) {
+		t.Fatal("duplicate credentials must be rejected without printing the token")
 	}
 }

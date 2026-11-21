@@ -1,5 +1,6 @@
 import http from 'node:http';
 import https from 'node:https';
+import { MAX_JSON } from './limits.js';
 
 export class QentimArtError extends Error {
   constructor(message, { status, code, cause } = {}) {
@@ -11,6 +12,17 @@ export class QentimArtError extends Error {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+export async function readCapped(stream, maxBytes) {
+  const chunks = [];
+  let total = 0;
+  for await (const chunk of stream) {
+    total += chunk.length;
+    if (total > maxBytes) throw new QentimArtError('response exceeds size limit', { code: 'ETOOLARGE' });
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks, total);
+}
 
 /**
  * 精简的 keep-alive HTTP 客户端。直接使用 node:http（而非 fetch），
@@ -52,18 +64,16 @@ export class HttpClient {
           agent: this.agent,
           signal,
         },
-        (res) => {
+        async (res) => {
           if (res.statusCode >= 300) {
-            const chunks = [];
-            res.on('data', (c) => chunks.push(c));
-            res.on('end', () => {
-              let msg = Buffer.concat(chunks).toString('utf8');
-              try {
-                msg = JSON.parse(msg).error || msg;
-              } catch {}
-              reject(new QentimArtError(`${method} ${path}: HTTP ${res.statusCode}: ${msg}`, { status: res.statusCode }));
-            });
-            res.on('error', reject);
+            let msg;
+            try {
+              msg = (await readCapped(res, 8192)).toString('utf8');
+              try { msg = JSON.parse(msg).error || msg; } catch {}
+            } catch (err) {
+              msg = err.message;
+            }
+            reject(new QentimArtError(`${method} ${path}: HTTP ${res.statusCode}: ${msg}`, { status: res.statusCode }));
             return;
           }
           resolve(res);
@@ -78,9 +88,7 @@ export class HttpClient {
   async buffer(method, path, opts) {
     return this.withRetry(async () => {
       const res = await this.raw(method, path, opts);
-      const chunks = [];
-      for await (const c of res) chunks.push(c);
-      return { body: Buffer.concat(chunks), headers: res.headers };
+      return { body: await readCapped(res, opts?.maxBytes ?? MAX_JSON), headers: res.headers };
     }, opts?.signal);
   }
 
@@ -98,7 +106,7 @@ export class HttpClient {
         return await fn(attempt);
       } catch (err) {
         lastErr = err;
-        if (err?.name === 'AbortError' || signal?.aborted) throw err;
+        if (err?.name === 'AbortError' || signal?.aborted || ['ETOOLARGE', 'ECORRUPT'].includes(err.code)) throw err;
         if (err instanceof QentimArtError && err.status && err.status < 500) throw err;
         if (attempt < this.retries) await sleep(300 * 2 ** attempt);
       }

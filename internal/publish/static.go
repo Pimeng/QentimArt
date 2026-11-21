@@ -39,7 +39,12 @@ func RunStatic(ctx context.Context, backend storage.Backend, project string, opt
 	if err := opts.normalize(); err != nil {
 		return nil, err
 	}
-	ck, err := chunkTree(opts)
+	dir, err := os.OpenRoot(opts.Dir)
+	if err != nil {
+		return nil, err
+	}
+	defer dir.Close()
+	ck, err := chunkTree(dir, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -49,8 +54,10 @@ func RunStatic(ctx context.Context, backend storage.Backend, project string, opt
 	if err != nil {
 		return nil, fmt.Errorf("read existing versions: %w", err)
 	}
-	if _, ok := existing[opts.Version]; ok {
+	if _, err := backend.Stat(ctx, catalog.MetaKey(opts.Version)); err == nil {
 		return nil, fmt.Errorf("version %s already exists (versions are immutable)", opts.Version)
+	} else if !errors.Is(err, storage.ErrNotFound) {
+		return nil, err
 	}
 
 	// ---- 查缺：对每个唯一块做 Stat ----
@@ -230,7 +237,7 @@ func staticWriteChunks(ctx context.Context, backend storage.Backend, files []fil
 				if open != nil {
 					open.Close()
 				}
-				f, err := os.Open(files[l.file].abs)
+				f, err := files[l.file].open()
 				if err != nil {
 					return err
 				}
@@ -283,7 +290,7 @@ func readVersions(ctx context.Context, backend storage.Backend) (map[string]*cat
 		return nil, err
 	}
 	for _, k := range keys {
-		b, err := storage.ReadAll(ctx, backend, k)
+		b, err := storage.ReadAll(ctx, backend, k, catalog.MaxMetaBytes)
 		if errors.Is(err, storage.ErrNotFound) {
 			continue
 		}
@@ -294,17 +301,20 @@ func readVersions(ctx context.Context, backend storage.Backend) (map[string]*cat
 		if err := json.Unmarshal(b, &vi); err != nil {
 			return nil, fmt.Errorf("%s: %w", k, err)
 		}
+		if !semver.Valid(vi.Version) || catalog.MetaKey(vi.Version) != k {
+			return nil, fmt.Errorf("version metadata does not match its key %q", k)
+		}
 		out[vi.Version] = &vi
 	}
 	return out, nil
 }
 
 func readManifest(ctx context.Context, backend storage.Backend, v string) (*manifest.Manifest, error) {
-	gz, err := storage.ReadAll(ctx, backend, catalog.ManifestKey(v))
+	gz, err := storage.ReadAll(ctx, backend, catalog.ManifestKey(v), manifest.MaxCompressedBytes)
 	if err != nil {
 		return nil, err
 	}
-	return manifest.Decode(gz, 1<<30)
+	return manifest.Decode(gz, manifest.MaxRawBytes)
 }
 
 // closestLower 返回按 SemVer 严格小于 v 的最高版本。

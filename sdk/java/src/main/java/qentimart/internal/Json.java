@@ -19,7 +19,7 @@ public final class Json {
     public static Object parse(String s) {
         Parser p = new Parser(s);
         p.ws();
-        Object v = p.value();
+        Object v = p.value(0);
         p.ws();
         if (p.pos != p.len) throw new IllegalArgumentException("JSON: trailing data at " + p.pos);
         return v;
@@ -53,12 +53,13 @@ public final class Json {
             }
         }
 
-        Object value() {
+        Object value(int depth) {
+            if (depth > 100) throw err("nesting too deep");
             if (pos >= len) throw err("unexpected end");
             char c = s.charAt(pos);
             switch (c) {
-                case '{': return obj();
-                case '[': return arr();
+                case '{': return obj(depth);
+                case '[': return arr(depth);
                 case '"': return str();
                 case 't': expect("true"); return Boolean.TRUE;
                 case 'f': expect("false"); return Boolean.FALSE;
@@ -67,7 +68,7 @@ public final class Json {
             }
         }
 
-        Map<String, Object> obj() {
+        Map<String, Object> obj(int depth) {
             LinkedHashMap<String, Object> m = new LinkedHashMap<>();
             pos++;
             ws();
@@ -83,7 +84,7 @@ public final class Json {
                 if (pos >= len || s.charAt(pos) != ':') throw err("expected ':'");
                 pos++;
                 ws();
-                m.put(k, value());
+                m.put(k, value(depth + 1));
                 ws();
                 if (pos >= len) throw err("unterminated object");
                 char c = s.charAt(pos++);
@@ -92,7 +93,7 @@ public final class Json {
             }
         }
 
-        List<Object> arr() {
+        List<Object> arr(int depth) {
             ArrayList<Object> a = new ArrayList<>();
             pos++;
             ws();
@@ -102,7 +103,7 @@ public final class Json {
             }
             while (true) {
                 ws();
-                a.add(value());
+                a.add(value(depth + 1));
                 ws();
                 if (pos >= len) throw err("unterminated array");
                 char c = s.charAt(pos++);

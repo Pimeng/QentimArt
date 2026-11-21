@@ -28,6 +28,7 @@ func setup(t *testing.T) (*httptest.Server, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { store.Close() })
 	cfg := server.Config{Tokens: []server.TokenConfig{
 		{Token: pubTok, Role: "publish", Projects: []string{"*"}},
 		{Token: readTok, Role: "read", Projects: []string{"game"}},
@@ -202,6 +203,7 @@ func setupGrace(t *testing.T, grace string) *httptest.Server {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { store.Close() })
 	cfg := server.Config{Tokens: []server.TokenConfig{
 		{Token: pubTok, Role: "publish", Projects: []string{"*"}},
 		{Token: adminTok, Role: "admin", Projects: []string{"*"}},

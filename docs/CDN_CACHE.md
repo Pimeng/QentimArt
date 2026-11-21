@@ -1,6 +1,6 @@
 # CDN 缓存配置
 
-QentimArt 下游拉取只用 HTTP `GET`，而且路径按可变性天然分成两类：
+公开资源可以按 URL 的可变性配置共享缓存：
 
 - 不可变资源：数据块 `chunks/<哈希>` 和带具体版本号的清单 `versions/<v>/...`。URL 和内容一一绑定，发新版只会多出新 URL，旧 URL 永远不变。
 - 可变指针：全站只有一个入口会变——静态模式是 `index.json`，动态模式是 `latest` 相关接口。
@@ -11,7 +11,9 @@ QentimArt 下游拉取只用 HTTP `GET`，而且路径按可变性天然分成�
 
 ### 动态模式（`qentimart-server`）
 
-接口都在 `/api/v1/projects/{project}/` 下。服务端已经给可长期缓存的响应带上了 `Cache-Control: public, max-age=31536000, immutable`，CDN 遵循源站缓存头即可：
+接口都在 `/api/v1/projects/{project}/` 下。**要求令牌才能读取的部署**会为成功响应发送 `Cache-Control: private, no-store`。CDN 应对整个 API 前缀绕过缓存，确保每次请求都回源鉴权。若旧版本已部署在 CDN 后，升级时须清除该前缀下已有的缓存，并移除强制缓存规则。由公开读取切换为私有读取时也需要清理旧缓存。
+
+下表适用于允许匿名读取的部署。此时服务端为可长期缓存的响应发送 `Cache-Control: public, max-age=31536000, immutable`。
 
 | 请求 | 会不会变 | 服务端缓存头 | CDN 建议 |
 |---|---|---|---|
@@ -36,7 +38,7 @@ QentimArt 下游拉取只用 HTTP `GET`，而且路径按可变性天然分成�
 
 ## 通用配置要点
 
-不管用哪家 CDN，主要就注意几件事：
+以下配置适用于公开动态接口和公开静态资源。
 
 - 让 CDN 优先遵循源站的 `Cache-Control`（动态服务端响应头或静态 `_headers`），自定义规则只用来补源站没带头的路径。
 - `chunks/*` 和带具体版本号的 `versions/<v>/*` 配 365 天或更长，尽量带上 `immutable`。
@@ -44,7 +46,7 @@ QentimArt 下游拉取只用 HTTP `GET`，而且路径按可变性天然分成�
 - 不可变路径都不依赖查询参数，缓存键忽略查询字符串可以避免无关参数打散命中率（`latest`、`diff` 这类带参数的本身不缓存）。
 - 动态模式的批量取块走的是 `POST …/chunks/fetch`，默认不走 CDN 缓存；想让 CDN 分担数据块流量，要么走 `GET …/chunks/{hash}`，要么直接上静态模式。
 
-## 腾讯云 EdgeOne
+## 腾讯云 EdgeOne 公开资源配置
 
 对照 [EdgeOne 缓存配置概述](https://cloud.tencent.com/document/product/1552/95263) 配几项就行：
 
@@ -58,7 +60,7 @@ QentimArt 下游拉取只用 HTTP `GET`，而且路径按可变性天然分成�
 | 预热缓存 | 可选；发大版本且预期有高峰时，可以预热新版 `manifest` 和热点块 |
 | 缓存文件预刷新 | 重资源都是 `immutable` 不过期，不用开 |
 
-## 阿里云 ESA
+## 阿里云 ESA 公开资源配置
 
 对照 [ESA 缓存入门](https://help.aliyun.com/zh/edge-security-acceleration/esa/user-guide/get-started-with-cache)：
 

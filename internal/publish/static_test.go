@@ -22,6 +22,7 @@ func TestGCStaticGraceProtectsOrphanChunks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { backend.Close() })
 	src := t.TempDir()
 	if err := os.WriteFile(filepath.Join(src, "a.bin"), bytes.Repeat([]byte("static-committed"), 2000), 0o644); err != nil {
 		t.Fatal(err)

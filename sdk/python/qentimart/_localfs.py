@@ -3,11 +3,14 @@ from __future__ import annotations
 import errno
 import hashlib
 import os
+import stat
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Dict, Iterable, NamedTuple, Set, Tuple, TypeVar
 
+from ._errors import QentimArtError
 from ._wire import STATE_DIR
 
 O_BINARY = getattr(os, "O_BINARY", 0)
@@ -17,6 +20,34 @@ T = TypeVar("T")
 class LocalFile(NamedTuple):
     size: int
     mtime_ms: int
+
+
+def is_link(st: os.stat_result) -> bool:
+    return stat.S_ISLNK(st.st_mode) or bool(getattr(st, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+def check_entry(path: str, *, directory: bool) -> None:
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return
+    if is_link(st) or not (stat.S_ISDIR(st.st_mode) if directory else stat.S_ISREG(st.st_mode)):
+        raise QentimArtError("unsafe filesystem entry %s" % path, code="EUNSAFE")
+
+
+def asset_path(root: str, rel: str) -> str:
+    """检查现有父目录，拒绝链接和 Windows 短文件名指向的其他条目。"""
+    path = root
+    parts = rel.split("/")
+    for i, part in enumerate(parts):
+        path = os.path.join(path, part)
+        if i < len(parts) - 1:
+            check_entry(path, directory=True)
+        if os.name == "nt" and "~" in part and os.path.lexists(path):
+            long_name = os.path.basename(os.path.realpath(path))
+            if os.path.normcase(long_name) != os.path.normcase(part):
+                raise QentimArtError("unsafe path alias %s" % rel, code="EUNSAFE")
+    return path
 
 
 def run_pool(items: Iterable[T], workers: int, fn: Callable[[T], None]) -> None:
@@ -57,7 +88,9 @@ def scan_dir(root: str) -> Tuple[Dict[str, LocalFile], Set[str]]:
         with it:
             for e in it:
                 r = rel + "/" + e.name if rel else e.name
-                if not rel and e.name == STATE_DIR:
+                if not rel and e.name.lower() == STATE_DIR:
+                    continue
+                if e.is_symlink() or (os.name == "nt" and is_link(e.stat(follow_symlinks=False))):
                     continue
                 if e.is_dir(follow_symlinks=False):
                     dirs.add(r)
@@ -73,8 +106,10 @@ def mtime_ms(path: str) -> int:
 
 
 def hash_file(path: str) -> str:
+    check_entry(path, directory=False)
     h = hashlib.sha256()
-    with open(path, "rb", buffering=0) as f:
+    fd = os.open(path, os.O_RDONLY | O_BINARY | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(fd, "rb", buffering=0) as f:
         buf = bytearray(1 << 20)
         mv = memoryview(buf)
         while True:
@@ -104,10 +139,16 @@ def replace_retry(src: str, dst: str, attempts: int = 8) -> None:
 
 
 def write_atomic(path: str, data: bytes) -> None:
-    tmp = "%s.%d.tmp" % (path, os.getpid())
-    with open(tmp, "wb") as f:
-        f.write(data)
-    replace_retry(tmp, path)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        replace_retry(tmp, path)
+    finally:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
 
 
 def dir_bytes(path: str) -> int:
@@ -136,11 +177,15 @@ class RandomAccessFile:
     （可用时使用 os.pread/os.pwrite，否则（如 Windows）使用锁 + seek）。"""
 
     def __init__(self, path: str, write: bool, size: int = 0):
-        flags = (os.O_RDWR | os.O_CREAT | os.O_TRUNC) if write else os.O_RDONLY
-        self.fd = os.open(path, flags | O_BINARY, 0o644)
+        flags = (os.O_RDWR | os.O_CREAT | os.O_EXCL) if write else os.O_RDONLY
+        self.fd = os.open(path, flags | O_BINARY | getattr(os, "O_NOFOLLOW", 0), 0o644)
         self.lock = threading.Lock()
         if write and size > 0:
-            os.ftruncate(self.fd, size)
+            try:
+                os.ftruncate(self.fd, size)
+            except BaseException:
+                self.close()
+                raise
 
     def write_at(self, offset: int, data: bytes) -> None:
         if hasattr(os, "pwrite"):
@@ -183,15 +228,24 @@ def pid_alive(pid: int) -> bool:
         return False
     if os.name == "nt":
         import ctypes
+        from ctypes import wintypes
 
-        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        open_process = kernel32.OpenProcess
+        open_process.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        open_process.restype = wintypes.HANDLE
+        handle = open_process(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
         if not handle:
-            return False
-        code = ctypes.c_ulong()
-        ok = kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
-        kernel32.CloseHandle(handle)
-        return bool(ok) and code.value == 259  # STILL_ACTIVE
+            return ctypes.get_last_error() != 87  # ERROR_INVALID_PARAMETER: no such process
+        try:
+            get_exit_code = kernel32.GetExitCodeProcess
+            get_exit_code.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+            code = wintypes.DWORD()
+            return not get_exit_code(handle, ctypes.byref(code)) or code.value == 259  # STILL_ACTIVE
+        finally:
+            close_handle = kernel32.CloseHandle
+            close_handle.argtypes = (wintypes.HANDLE,)
+            close_handle(handle)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:

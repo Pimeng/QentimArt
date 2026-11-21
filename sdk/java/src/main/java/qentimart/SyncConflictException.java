@@ -16,7 +16,7 @@ public class SyncConflictException extends QentimArtException {
         String head = String.join(", ", conflicts.subList(0, Math.min(10, conflicts.size())))
                 + (conflicts.size() > 10 ? ", ..." : "");
         return conflicts.size()
-                + " locally modified/untracked file(s) block the sync (localChanges='fail'): " + head;
+                + " locally modified/untracked file(s) block the sync: " + head;
     }
 
     public List<String> conflicts() {

@@ -42,3 +42,16 @@ func TestFrameHeaderRejectsOversize(t *testing.T) {
 		t.Fatalf("valid header rejected: %v", err)
 	}
 }
+
+func TestStoredBlobBoundaries(t *testing.T) {
+	if _, _, _, err := ParseBlob(Blob(EncDeflate, MaxChunkSize+1, nil)); err == nil {
+		t.Fatal("stored blob with excessive decoded length accepted")
+	}
+	raw := []byte("fixture")
+	z := Deflate(raw)
+	for _, invalid := range [][]byte{z[:len(z)-1], append(z, 1)} {
+		if _, err := Decode(EncDeflate, uint32(len(raw)), invalid, Sum(raw)); err == nil {
+			t.Fatal("incomplete or trailing deflate data accepted")
+		}
+	}
+}

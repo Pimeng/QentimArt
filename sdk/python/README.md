@@ -1,6 +1,6 @@
 # qentimart-sdk (Python)
 
-QentimArt 的 Python 下游客户端，只用标准库，要求 Python ≥ 3.8。本地 `.qentimart/` 状态格式与 [Node.js SDK](../nodejs/README.md)、[Java SDK](../java/README.md) 通用，几个 SDK 可以混用同一个素材目录。
+QentimArt 的 Python 下游客户端，要求 Python ≥ 3.8，默认无第三方依赖。本地 `.qentimart/` 状态格式与 [Node.js SDK](../nodejs/README.md)、[Java SDK](../java/README.md) 通用，几个 SDK 可以混用同一个素材目录。
 
 同步时优先从本地旧文件里复用还能用上的块，只多线程并发拉取缺失块，逐块校验 SHA-256 后通过临时文件 rename 替换；本地不留块缓存，同步后目录里只有素材文件和 `.qentimart/` 状态清单（实测总占用约 100.04%）。
 
@@ -42,6 +42,8 @@ with QentimArtClient(base_url="https://mygame.pages.dev") as client:
 ```
 
 `sync`、`plan`、`status`、`verify`、`diff`、`storage_report` 用法与连接服务端时相同。
+
+如果静态源发送 `Content-Encoding: br`，请安装支持限制解压输出的 `Brotli`（1.2.0 或更新版本）。未压缩、gzip 和 deflate 响应由标准库处理。
 
 ## API
 

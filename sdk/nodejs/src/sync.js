@@ -2,12 +2,13 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { QentimArtError } from './http.js';
 import { sha256hex } from './frames.js';
-import { parseManifest, STATE_DIR } from './manifest.js';
-import { pool, scanDir, hashFile, writeFileAtomic, renameRetry, pruneEmptyDirs } from './localfs.js';
+import { MAX_MANIFEST_RAW, MAX_MANIFEST_GZ } from './limits.js';
+import { parseManifest, validateVersion, STATE_DIR } from './manifest.js';
+import { pool, scanDir, hashFile, openRegularFile, writeFileAtomic, renameRetry, pruneEmptyDirs, stateDirectory, readRegularFile } from './localfs.js';
 
 export class SyncConflictError extends QentimArtError {
   constructor(conflicts) {
-    super(`${conflicts.length} locally modified/untracked file(s) block the sync (localChanges='fail'): ${conflicts.slice(0, 10).join(', ')}${conflicts.length > 10 ? ', ...' : ''}`, { code: 'ECONFLICT' });
+    super(`${conflicts.length} locally modified/untracked file(s) block the sync: ${conflicts.slice(0, 10).join(', ')}${conflicts.length > 10 ? ', ...' : ''}`, { code: 'ECONFLICT' });
     this.name = 'SyncConflictError';
     this.conflicts = conflicts;
   }
@@ -21,20 +22,23 @@ const LOCK_FILE = 'lock';
 // ---------------------------------------------------------------- 本地状态
 
 export async function readState(dir) {
-  const sd = path.join(dir, STATE_DIR);
+  const sd = await stateDirectory(dir);
   let state = null;
   let manifest = null;
   let manifestGz = null;
   try {
-    state = JSON.parse(await fs.readFile(path.join(sd, STATE_FILE), 'utf8'));
-    if (state.formatVersion !== 1) state = null;
-  } catch {}
+    state = JSON.parse(await readRegularFile(path.join(sd, STATE_FILE), MAX_MANIFEST_RAW, 'utf8'));
+    if (state?.formatVersion !== 1 || !state.files || typeof state.files !== 'object' || Array.isArray(state.files)) state = null;
+  } catch (err) {
+    if (['EUNSAFE', 'ETOOLARGE'].includes(err.code)) throw err;
+  }
   if (state) {
     try {
-      manifestGz = await fs.readFile(path.join(sd, MANIFEST_FILE));
+      manifestGz = await readRegularFile(path.join(sd, MANIFEST_FILE), MAX_MANIFEST_GZ);
       manifest = parseManifest(manifestGz);
       if (manifest.version !== state.version) manifest = null;
-    } catch {
+    } catch (err) {
+      if (['EUNSAFE', 'ETOOLARGE'].includes(err.code)) throw err;
       manifest = null;
     }
   }
@@ -42,14 +46,12 @@ export async function readState(dir) {
 }
 
 async function writeState(dir, state, manifestGz) {
-  const sd = path.join(dir, STATE_DIR);
-  await fs.mkdir(sd, { recursive: true });
+  const sd = await stateDirectory(dir, true);
   await writeFileAtomic(path.join(sd, MANIFEST_FILE), manifestGz);
   await writeFileAtomic(path.join(sd, STATE_FILE), JSON.stringify(state));
 }
 
-// 进程内已持锁的目录（绝对路径）。文件锁的陈旧抢占含 "pid≠自己" 判定，故同进程内
-// 并发同步同目录时彼此会误判对方锁为陈旧并互夺；这一层在文件锁之前提供进程内互斥。
+// 同一进程里的并发调用先按工作目录互斥。
 const inProcessLocks = new Set();
 
 async function acquireLock(dir) {
@@ -59,30 +61,53 @@ async function acquireLock(dir) {
   }
   inProcessLocks.add(key);
   try {
-    const sd = path.join(dir, STATE_DIR);
-    await fs.mkdir(sd, { recursive: true });
+    const sd = await stateDirectory(dir, true);
     const lock = path.join(sd, LOCK_FILE);
     for (let i = 0; i < 2; i++) {
       try {
         const fh = await fs.open(lock, 'wx');
-        await fh.writeFile(JSON.stringify({ pid: process.pid, at: Date.now() }));
-        await fh.close();
+        try {
+          try {
+            await fh.writeFile(JSON.stringify({ pid: process.pid, at: Date.now() }));
+          } finally {
+            await fh.close();
+          }
+        } catch (err) {
+          await fs.rm(lock, { force: true }).catch(() => {});
+          throw err;
+        }
         return async () => {
-          inProcessLocks.delete(key);
-          await fs.rm(lock, { force: true });
+          try {
+            await fs.rm(lock, { force: true });
+          } finally {
+            inProcessLocks.delete(key);
+          }
         };
       } catch (err) {
         if (err.code !== 'EEXIST') throw err;
-        let stale = true;
+        let pid;
         try {
-          const info = JSON.parse(await fs.readFile(lock, 'utf8'));
-          if (info.pid && info.pid !== process.pid) {
-            try {
-              process.kill(info.pid, 0);
-              stale = false;
-            } catch {}
+          const info = JSON.parse(await readRegularFile(lock, 4096, 'utf8'));
+          pid = info?.pid;
+        } catch (err) {
+          if (err.code === 'ENOENT') continue;
+          if (!(err instanceof SyntaxError) && err.code !== 'ETOOLARGE') throw err;
+        }
+        let stale = false;
+        if (Number.isInteger(pid) && pid > 0 && pid <= 0x7fffffff) {
+          try {
+            process.kill(pid, 0);
+          } catch (err) {
+            stale = err.code === 'ESRCH';
           }
-        } catch {}
+        } else {
+          // 其他 SDK 也会先创建独占文件再写入 PID，刚创建的空锁不能抢占。
+          const st = await fs.lstat(lock).catch((err) => {
+            if (err.code !== 'ENOENT') throw err;
+          });
+          if (!st) continue;
+          stale = Date.now() - st.mtimeMs > 60_000;
+        }
         if (!stale) throw new QentimArtError(`another sync is running on ${dir}`, { code: 'ELOCKED' });
         await fs.rm(lock, { force: true }); // 只清理陈旧锁文件，保留进程内持有
       }
@@ -108,10 +133,10 @@ async function buildPlan(ctx, target) {
   // verifyAll 对所有文件强制哈希；verifyWanted(p) 只对指定的重要文件强制哈希（普通文件仍走快速路径）。
   const isClean = (p, l) => {
     const o = old.get(p);
-    return tracked[p] !== undefined && tracked[p] === l.mtimeMs && o && o.size === l.size && !opts.verifyAll && !verifyWanted(p);
+    return Object.hasOwn(tracked, p) && tracked[p] === l.mtimeMs && o && o.size === l.size && !opts.verifyAll && !verifyWanted(p);
   };
 
-  const plan = { toWrite: [], toDelete: [], unchanged: [], adopted: [], kept: [], conflicts: [], newTracked: {} };
+  const plan = { toWrite: [], toDelete: [], unchanged: [], adopted: [], kept: [], conflicts: [], newTracked: Object.create(null) };
   const toHash = [];
 
   for (const t of target.files.values()) {
@@ -163,8 +188,8 @@ async function buildPlan(ctx, target) {
       plan.toDelete.push(p);
       continue;
     }
-    // 该文件是否属于 SDK 受管范围：曾记录在状态里，或存在于旧清单中。
-    const managed = tracked[p] !== undefined || old.has(p);
+    // 旧清单界定管理范围；state.files 仅缓存文件的 mtime。
+    const managed = old.has(p);
     if (policy === 'overwrite') {
       if (managed) {
         // 受管但本地有改动：overwrite 语义为「以服务端为准还原」，服务端已无此文件 → 删除。
@@ -182,6 +207,27 @@ async function buildPlan(ctx, target) {
       plan.conflicts.push(p);
     }
   }
+  // 目录和文件互换时同样遵守普通文件的删除策略，提前发现受保护的子项。
+  const deletable = new Set(plan.toDelete);
+  const protectedDirs = new Set();
+  const markParents = (p) => {
+    for (let i = p.indexOf('/'); i >= 0; i = p.indexOf('/', i + 1)) protectedDirs.add(p.slice(0, i));
+  };
+  for (const p of local.files.keys()) if (!deletable.has(p)) markParents(p);
+  for (const p of local.other) markParents(p);
+  plan.toWrite = plan.toWrite.filter(({ t, reason }) => {
+    let blocked = reason === 'replace-dir' && protectedDirs.has(t.path);
+    for (let i = t.path.indexOf('/'); i >= 0; i = t.path.indexOf('/', i + 1)) {
+      const parent = t.path.slice(0, i);
+      if (local.other.has(parent)) throw new QentimArtError(`unsafe parent of ${t.path}`, { code: 'EUNSAFE' });
+      if (local.files.has(parent) && !deletable.has(parent)) blocked = true;
+    }
+    if (local.other.has(t.path)) throw new QentimArtError(`unsafe path ${t.path}`, { code: 'EUNSAFE' });
+    if (!blocked) return true;
+    if (policy === 'keep') plan.kept.push(t.path);
+    else plan.conflicts.push(t.path);
+    return false;
+  });
   plan.toWrite.sort((a, b) => (a.t.path < b.t.path ? -1 : 1));
   plan.toDelete.sort();
   return plan;
@@ -261,6 +307,7 @@ export async function runSync(client, dir, opts) {
   if (!['overwrite', 'keep', 'fail'].includes(opts.localChanges)) throw new QentimArtError(`invalid localChanges '${opts.localChanges}'`);
   dir = path.resolve(dir);
   await fs.mkdir(dir, { recursive: true });
+  dir = await fs.realpath(dir);
 
   const release = opts.dryRun ? async () => {} : await acquireLock(dir);
   const stats = { written: 0, reusedLocal: 0, downloadedRaw: 0, downloadedWire: 0 };
@@ -276,16 +323,18 @@ export async function runSync(client, dir, opts) {
 
   try {
     const { state, manifest: oldManifest, manifestGz: oldGz } = await readState(dir);
-    const sameProject = state && state.project === client.project;
+    const sameProject = state && state.project === client.project && (state.source == null || state.source === client.source);
 
     // 解析目标版本并加载其 manifest（未变化时复用本地副本）。
     progress('resolve', 0, 1, true);
     let version = opts.version;
     if (version === 'latest') version = (await client.getVersion('latest', { prerelease: opts.prerelease })).version;
+    validateVersion(version);
     let targetGz;
-    if (sameProject && oldManifest && oldManifest.version === version) targetGz = oldGz;
+    if (sameProject && state.source === client.source && oldManifest && oldManifest.version === version) targetGz = oldGz;
     else targetGz = (await client.fetchManifestRaw(version)).gz;
     const target = parseManifest(targetGz);
+    if (target.version !== version) throw new QentimArtError('manifest version mismatch');
 
     progress('scan', 0, 1, true);
     const local = await scanDir(dir);
@@ -298,13 +347,13 @@ export async function runSync(client, dir, opts) {
       opts,
       local,
       oldManifest: sameProject ? oldManifest : null,
-      tracked: sameProject ? state.files ?? {} : {},
+      tracked: sameProject && oldManifest ? state.files : {},
       hasState: Boolean(sameProject && oldManifest),
       verifyWanted,
       progress,
     };
     const plan = await buildPlan(ctx, target);
-    if (plan.conflicts.length && opts.localChanges === 'fail') throw new SyncConflictError(plan.conflicts);
+    if (plan.conflicts.length) throw new SyncConflictError(plan.conflicts);
 
     const sources = buildSources(ctx, target, plan);
     const writeBytes = plan.toWrite.reduce((n, w) => n + w.t.size, 0);
@@ -338,20 +387,22 @@ export async function runSync(client, dir, opts) {
     const newTracked = plan.newTracked;
     if (plan.toWrite.length) {
       await applyWrites(client, dir, opts, plan, sources, stats, newTracked, writeBytes, progress);
+    } else {
+      await fs.rm(path.join(dir, STATE_DIR, TMP_DIR), { recursive: true, force: true });
     }
 
     // 删除操作放在最后执行，这样待删除的文件仍可作为 chunk 来源。
     progress('cleanup', 0, plan.toDelete.length, true);
     for (const p of plan.toDelete) {
       // 该路径可能已经不存在，或已变成目标版本中的目录（文件 -> 目录）。
-      const st = await fs.lstat(path.join(dir, p)).catch(() => null);
-      if (!st || st.isDirectory()) continue;
+      const st = await fs.lstat(path.join(dir, p)).catch((err) => {
+        if (err.code !== 'ENOENT' && err.code !== 'ENOTDIR') throw err;
+      });
+      if (!st || !st.isFile()) continue;
       await fs.rm(path.join(dir, p), { force: true });
       await pruneEmptyDirs(dir, p);
     }
-    await fs.rm(path.join(dir, STATE_DIR, TMP_DIR), { recursive: true, force: true });
-
-    const newState = { formatVersion: 1, project: client.project, version, syncedAt: new Date().toISOString(), files: newTracked };
+    const newState = { formatVersion: 1, project: client.project, source: client.source, version, syncedAt: new Date().toISOString(), files: newTracked };
     await writeState(dir, newState, targetGz);
 
     Object.assign(result.bytes, stats);
@@ -412,21 +463,25 @@ async function applyWrites(client, dir, opts, plan, sources, stats, newTracked, 
   const deleteSet = new Set(plan.toDelete);
   let seq = 0;
 
-  for (const wave of waves(plan.toWrite, client.waveBytes, client.waveFiles)) {
-    if (opts.signal?.aborted) throw opts.signal.reason ?? new QentimArtError('sync aborted', { code: 'ABORT_ERR' });
-    const tasks = wave.map((w) => ({ ...w, tmp: path.join(tmpDir, `${seq++}.part`), fh: null }));
-    try {
-      await applyWave(client, dir, opts, tasks, sources, stats, newTracked, writeBytes, progress, deleteSet);
-    } finally {
-      for (const t of tasks) await t.fh?.close().catch(() => {});
+  try {
+    for (const wave of waves(plan.toWrite, client.waveBytes, client.waveFiles)) {
+      if (opts.signal?.aborted) throw opts.signal.reason ?? new QentimArtError('sync aborted', { code: 'ABORT_ERR' });
+      const tasks = wave.map((w) => ({ ...w, tmp: path.join(tmpDir, `${seq++}.part`), fh: null }));
+      try {
+        await applyWave(client, dir, opts, tasks, sources, stats, newTracked, writeBytes, progress, deleteSet);
+      } finally {
+        for (const t of tasks) await t.fh?.close().catch(() => {});
+      }
     }
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true });
   }
 }
 
 async function applyWave(client, dir, opts, tasks, sources, stats, newTracked, writeBytes, progress, deleteSet) {
   {
     await pool(tasks, 32, async (task) => {
-      task.fh = await fs.open(task.tmp, 'w');
+      task.fh = await fs.open(task.tmp, 'wx');
       if (task.t.size > 0) await task.fh.truncate(task.t.size);
     });
 
@@ -440,7 +495,15 @@ async function applyWave(client, dir, opts, tasks, sources, stats, newTracked, w
       }
     }
     const writeChunk = async (n, buf) => {
-      await Promise.all(n.dests.map((d) => d.fh.write(buf, 0, buf.length, d.offset)));
+      if (n.size !== buf.length) throw new QentimArtError('chunk size differs from manifest', { code: 'ECORRUPT' });
+      await pool(n.dests, 32, async (d) => {
+        let written = 0;
+        while (written < buf.length) {
+          const { bytesWritten } = await d.fh.write(buf, written, buf.length - written, d.offset + written);
+          if (!bytesWritten) throw new QentimArtError('incomplete chunk write');
+          written += bytesWritten;
+        }
+      });
       stats.written += buf.length * n.dests.length;
       progress('download', stats.written, writeBytes);
     };
@@ -449,30 +512,33 @@ async function applyWave(client, dir, opts, tasks, sources, stats, newTracked, w
     const readers = new Map();
     const reader = async (p) => {
       let r = readers.get(p);
-      if (!r) readers.set(p, (r = fs.open(path.join(dir, p), 'r').catch(() => null)));
+      if (!r) readers.set(p, (r = openRegularFile(path.join(dir, p)).catch(() => null)));
       return r;
     };
     const remaining = [];
-    await pool([...need], 16, async ([hash, n]) => {
-      for (const s of sources.candidates(hash)) {
-        const fh = await reader(s.path);
-        if (!fh) continue;
-        const buf = Buffer.allocUnsafe(s.size);
-        let got = 0;
-        try {
-          ({ bytesRead: got } = await fh.read(buf, 0, s.size, s.offset));
-        } catch {
-          continue;
+    try {
+      await pool([...need], 16, async ([hash, n]) => {
+        for (const s of sources.candidates(hash)) {
+          const fh = await reader(s.path);
+          if (!fh) continue;
+          const buf = Buffer.allocUnsafe(s.size);
+          let got = 0;
+          try {
+            ({ bytesRead: got } = await fh.read(buf, 0, s.size, s.offset));
+          } catch {
+            continue;
+          }
+          if (got === s.size && sha256hex(buf) === hash) {
+            await writeChunk(n, buf);
+            stats.reusedLocal += buf.length;
+            return;
+          }
         }
-        if (got === s.size && sha256hex(buf) === hash) {
-          await writeChunk(n, buf);
-          stats.reusedLocal += buf.length;
-          return;
-        }
-      }
-      remaining.push(hash);
-    });
-    for (const r of readers.values()) (await r)?.close().catch(() => {});
+        remaining.push(hash);
+      });
+    } finally {
+      for (const r of readers.values()) await (await r)?.close();
+    }
 
     // 2) 获取其余 chunk（动态模式批量拉帧流，静态模式逐块 GET，由 client 决定）
     if (remaining.length) {
@@ -489,11 +555,20 @@ async function applyWave(client, dir, opts, tasks, sources, stats, newTracked, w
     await pool(tasks, 32, async (task) => {
       await task.fh.close();
       task.fh = null;
+      if (task.t.chunks.length > 1 && await hashFile(task.tmp) !== task.t.hash) {
+        throw new QentimArtError(`file ${task.t.path} failed verification`, { code: 'ECORRUPT' });
+      }
     });
     for (const task of tasks) {
       const target = path.join(dir, task.t.path);
-      await ensureParent(dir, task.t.path, deleteSet, opts.localChanges);
-      if (task.reason === 'replace-dir') await fs.rm(target, { recursive: true, force: true });
+      await ensureParent(dir, task.t.path, deleteSet);
+      if (task.reason === 'replace-dir') await removePlannedDir(dir, task.t.path, deleteSet);
+      if (task.reason === 'create') {
+        const exists = await fs.lstat(target).catch((err) => {
+          if (err.code !== 'ENOENT') throw err;
+        });
+        if (exists) throw new SyncConflictError([task.t.path]);
+      }
       try {
         await renameRetry(task.tmp, target);
       } catch (err) {
@@ -508,20 +583,26 @@ async function applyWave(client, dir, opts, tasks, sources, stats, newTracked, w
 
 // 逐段创建父目录，绝不跟随符号链接：若某个已存在的祖先是符号链接，拒绝写入，
 // 以免清单路径合法但本地父目录指向 root 之外时，rename 把文件写到 root 外（逃逸）。
-async function ensureParent(dir, rel, deleteSet, policy) {
+async function ensureParent(dir, rel, deleteSet) {
   const parent = path.posix.dirname(rel);
   if (parent === '.') return;
   const segs = parent.split('/');
   for (let i = 1; i <= segs.length; i++) {
     const p = segs.slice(0, i).join('/');
     const abs = path.join(dir, p);
-    const st = await fs.lstat(abs).catch(() => null);
+    const st = await fs.lstat(abs).catch((err) => {
+      if (err.code !== 'ENOENT') throw err;
+    });
     if (st && st.isSymbolicLink()) {
       throw new QentimArtError(`unsafe path ${rel}: '${p}' is a symlink`, { code: 'EUNSAFE' });
     }
+    if (i === 1 && st?.isDirectory() && process.platform === 'win32') {
+      const canonical = await fs.realpath(abs);
+      if (path.basename(canonical).toLowerCase() === STATE_DIR) throw new QentimArtError('unsafe state directory alias', { code: 'EUNSAFE' });
+    }
     if (st && !st.isDirectory()) {
       // 该位置是普通文件，但需要它是目录（例如 "a" -> "a/b"）。
-      if (!deleteSet.has(p) && policy !== 'overwrite') throw new QentimArtError(`${p} is a file but ${rel} needs it to be a directory`);
+      if (!deleteSet.has(p)) throw new QentimArtError(`${p} is a file but ${rel} needs it to be a directory`);
       await fs.rm(abs, { force: true });
       deleteSet.delete(p);
       await fs.mkdir(abs);
@@ -531,12 +612,24 @@ async function ensureParent(dir, rel, deleteSet, policy) {
   }
 }
 
+async function removePlannedDir(dir, rel, deleteSet) {
+  const abs = path.join(dir, rel);
+  if (!(await fs.lstat(abs)).isDirectory()) throw new QentimArtError(`unsafe directory ${rel}`, { code: 'EUNSAFE' });
+  for (const entry of await fs.readdir(abs, { withFileTypes: true })) {
+    const child = rel + '/' + entry.name;
+    if (entry.isDirectory()) await removePlannedDir(dir, child, deleteSet);
+    else if (entry.isFile() && deleteSet.has(child)) await fs.unlink(path.join(dir, child));
+    else throw new SyncConflictError([child]);
+  }
+  await fs.rmdir(abs);
+}
+
 // ---------------------------------------------------------------- 状态查询
 
-export async function runStatus(dir, project) {
+export async function runStatus(dir, project, source) {
   dir = path.resolve(dir);
   const { state, manifest } = await readState(dir);
-  if (!state || !manifest || (project && state.project !== project)) {
+  if (!state || !manifest || state.project !== project || (state.source != null && state.source !== source)) {
     return { synced: false, project: state?.project ?? null, version: null, modified: [], missing: [], untracked: [] };
   }
   const local = await scanDir(dir);
@@ -567,11 +660,12 @@ export async function runVerify(dir, onProgress) {
   const bad = [];
   let done = 0;
   const files = [...manifest.files.values()];
+  const local = await scanDir(dir);
   const total = files.reduce((n, f) => n + f.size, 0);
   await pool(files, 4, async (f) => {
     let h = null;
     try {
-      h = await hashFile(path.join(dir, f.path));
+      if (local.files.get(f.path)?.size === f.size) h = await hashFile(path.join(dir, f.path));
     } catch {}
     if (h !== f.hash) bad.push(f.path);
     done += f.size;

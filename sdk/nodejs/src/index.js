@@ -1,10 +1,11 @@
 import path from 'node:path';
 import { HttpClient, QentimArtError } from './http.js';
 import { StaticTransport } from './static.js';
-import { parseManifest, diffManifests, STATE_DIR } from './manifest.js';
+import { parseManifest, diffManifests, validateVersion, STATE_DIR } from './manifest.js';
 import { parseFrames, decodeFrame } from './frames.js';
 import { runSync, runStatus, runVerify, SyncConflictError } from './sync.js';
-import { dirBytes, scanDir } from './localfs.js';
+import { dirBytes, scanDir, pool, stateDirectory } from './localfs.js';
+import { MAX_MANIFEST_GZ } from './limits.js';
 
 export { QentimArtError, SyncConflictError, STATE_DIR };
 
@@ -13,6 +14,7 @@ function versionFromIndex(idx, version, prerelease) {
   let v = version;
   if (version === 'latest') v = prerelease ? idx.latestPrerelease : idx.latest;
   if (!v) throw new QentimArtError('project has no versions');
+  validateVersion(v);
   const hit = (idx.versions || []).find((x) => x.version === v);
   if (!hit) throw new QentimArtError(`version ${v} not found`, { status: 404 });
   return hit;
@@ -40,8 +42,10 @@ async function apiFetchChunks(client, { hashes, sizeOf, onChunk, stats, signal }
       const body = Buffer.concat([...pending].map((h) => Buffer.from(h, 'hex')));
       const res = await client.http.raw('POST', '/chunks/fetch', { body, headers: { 'content-type': 'application/octet-stream' }, signal });
       try {
-        for await (const f of parseFrames(res)) {
-          if (!pending.has(f.hash)) throw new QentimArtError(`server sent unexpected chunk ${f.hash}`);
+        for await (const f of parseFrames(res, (hash) => {
+          if (!pending.has(hash)) throw new QentimArtError(`server sent unexpected chunk ${hash}`, { code: 'ECORRUPT' });
+          return sizeOf(hash);
+        })) {
           const raw = await decodeFrame(f);
           stats.downloadedWire += f.payload.length + 41;
           stats.downloadedRaw += raw.length;
@@ -57,15 +61,7 @@ async function apiFetchChunks(client, { hashes, sizeOf, onChunk, stats, signal }
     }, signal);
   };
 
-  let i = 0;
-  await Promise.all(
-    Array.from({ length: Math.max(1, Math.min(client.concurrency, batches.length)) }, async () => {
-      while (i < batches.length) {
-        const b = batches[i++];
-        await runBatch(b);
-      }
-    }),
-  );
+  await pool(batches, client.concurrency, runBatch);
 }
 
 /**
@@ -102,6 +98,8 @@ export class QentimArtClient {
       this.project = project;
       this.http = new HttpClient({ server, project, token, concurrency, timeoutMs, retries });
     }
+    const source = this.mode === 'static' ? this.static.origin : this.http.base;
+    this.source = source.origin + source.pathname.replace(/\/+$/, '');
   }
 
   /** 释放连接池。 */
@@ -132,17 +130,21 @@ export class QentimArtClient {
   async fetchManifestRaw(version = 'latest', { prerelease = false } = {}) {
     if (this.mode === 'static') {
       const vi = await this.getVersion(version, { prerelease });
-      const gz = await this.static.getBuffer(`versions/${vi.version}/manifest.json.gz`);
+      const gz = await this.static.getBuffer(`versions/${vi.version}/manifest.json.gz`, undefined, MAX_MANIFEST_GZ);
       return { version: vi.version, gz };
     }
-    const { body, headers } = await this.http.buffer('GET', `/versions/${encodeURIComponent(version)}/manifest${prerelease ? '?prerelease=1' : ''}`);
+    const { body, headers } = await this.http.buffer('GET', `/versions/${encodeURIComponent(version)}/manifest${prerelease ? '?prerelease=1' : ''}`, { maxBytes: MAX_MANIFEST_GZ });
     return { version: headers['x-qentimart-version'], gz: body };
   }
 
   /** 下载并解析 manifest。 */
   async fetchManifest(version = 'latest', opts) {
-    const { gz } = await this.fetchManifestRaw(version, opts);
-    return parseManifest(gz);
+    const raw = await this.fetchManifestRaw(version, opts);
+    const manifest = parseManifest(raw.gz);
+    if ((raw.version && manifest.version !== raw.version) || (version !== 'latest' && manifest.version !== version)) {
+      throw new QentimArtError('manifest version mismatch');
+    }
+    return manifest;
   }
 
   /** 内部：取一批块，每块解码校验后回调 onChunk(hash, raw)。 */
@@ -167,7 +169,7 @@ export class QentimArtClient {
 
   /** 相对上次同步版本的本地状态（无网络）。 */
   status(dir) {
-    return runStatus(dir, this.project);
+    return runStatus(dir, this.project, this.source);
   }
 
   /** 重新计算当前版本每个文件的哈希。 */
@@ -181,7 +183,7 @@ export class QentimArtClient {
     const { files } = await scanDir(dir);
     let assetBytes = 0;
     for (const f of files.values()) assetBytes += f.size;
-    const overheadBytes = await dirBytes(path.join(dir, STATE_DIR));
+    const overheadBytes = await dirBytes(await stateDirectory(dir));
     return { assetBytes, overheadBytes, ratio: assetBytes ? (assetBytes + overheadBytes) / assetBytes : 1 };
   }
 }

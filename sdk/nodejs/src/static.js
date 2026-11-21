@@ -1,24 +1,25 @@
 import http from 'node:http';
 import https from 'node:https';
 import zlib from 'node:zlib';
-import { QentimArtError } from './http.js';
+import { QentimArtError, readCapped } from './http.js';
 import { pool } from './localfs.js';
 import { decodeBlob } from './frames.js';
+import { MAX_JSON, MAX_STORED_SIZE } from './limits.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // 按响应的 Content-Encoding 透明解压：node:http(s) 不会自动处理传输层编码，
 // 而很多 CDN / 对象存储会对 index.json 之类的响应强制 gzip（即便请求 identity）。
 // 以响应头为准解码，对不带该头的 .gz 清单和原始 chunk 零影响。
-function decodeBody(buf, encoding) {
+function decodeBody(buf, encoding, maxOutputLength) {
   switch (String(encoding || '').toLowerCase().trim()) {
     case 'gzip':
     case 'x-gzip':
-      return zlib.gunzipSync(buf);
+      return zlib.gunzipSync(buf, { maxOutputLength });
     case 'deflate':
-      return zlib.inflateSync(buf);
+      return zlib.inflateSync(buf, { maxOutputLength });
     case 'br':
-      return zlib.brotliDecompressSync(buf);
+      return zlib.brotliDecompressSync(buf, { maxOutputLength });
     default:
       return buf;
   }
@@ -46,7 +47,7 @@ export class StaticTransport {
     this.agent.destroy();
   }
 
-  _get(relPath, signal) {
+  _get(relPath, signal, maxBytes) {
     return new Promise((resolve, reject) => {
       const req = this.mod.request(
         {
@@ -58,22 +59,18 @@ export class StaticTransport {
           agent: this.agent,
           signal,
         },
-        (res) => {
+        async (res) => {
           if (res.statusCode >= 300) {
-            res.resume();
+            res.destroy();
             reject(new QentimArtError(`GET ${relPath}: HTTP ${res.statusCode}`, { status: res.statusCode }));
             return;
           }
-          const chunks = [];
-          res.on('data', (c) => chunks.push(c));
-          res.on('end', () => {
-            try {
-              resolve(decodeBody(Buffer.concat(chunks), res.headers['content-encoding']));
-            } catch (err) {
-              reject(new QentimArtError(`GET ${relPath}: cannot decode response body: ${err.message}`, { code: err.code, cause: err }));
-            }
-          });
-          res.on('error', reject);
+          try {
+            const buf = await readCapped(res, maxBytes);
+            resolve(decodeBody(buf, res.headers['content-encoding'], maxBytes));
+          } catch (err) {
+            reject(err);
+          }
         },
       );
       req.setTimeout(this.timeoutMs, () => req.destroy(new QentimArtError(`GET ${relPath}: timeout`, { code: 'ETIMEDOUT' })));
@@ -82,15 +79,15 @@ export class StaticTransport {
     });
   }
 
-  async getBuffer(relPath, signal) {
+  async getBuffer(relPath, signal, maxBytes = MAX_JSON) {
     let last;
     for (let attempt = 0; attempt <= this.retries; attempt++) {
       if (signal?.aborted) throw signal.reason ?? new QentimArtError('aborted', { code: 'ABORT_ERR' });
       try {
-        return await this._get(relPath, signal);
+        return await this._get(relPath, signal, maxBytes);
       } catch (err) {
         last = err;
-        if (err?.name === 'AbortError' || signal?.aborted) throw err;
+        if (err?.name === 'AbortError' || signal?.aborted || ['ETOOLARGE', 'ERR_BUFFER_TOO_LARGE'].includes(err.code)) throw err;
         if (err instanceof QentimArtError && err.status && err.status < 500 && err.status !== 429) throw err;
         if (attempt < this.retries) await sleep(300 * 2 ** attempt);
       }
@@ -109,10 +106,10 @@ export class StaticTransport {
   }
 
   /** 按哈希逐个 GET chunk，并发 concurrency；每块解码并校验后交给 onChunk。 */
-  async fetchChunks({ hashes, onChunk, stats, signal }) {
+  async fetchChunks({ hashes, sizeOf, onChunk, stats, signal }) {
     await pool(hashes, this.concurrency, async (h) => {
-      const buf = await this.getBuffer(`chunks/${h.slice(0, 2)}/${h}`, signal);
-      const raw = await decodeBlob(buf, h);
+      const buf = await this.getBuffer(`chunks/${h.slice(0, 2)}/${h}`, signal, 5 + MAX_STORED_SIZE);
+      const raw = await decodeBlob(buf, h, sizeOf(h));
       stats.downloadedWire += buf.length;
       stats.downloadedRaw += raw.length;
       await onChunk(h, raw);

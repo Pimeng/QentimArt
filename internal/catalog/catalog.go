@@ -15,6 +15,9 @@ import (
 // IndexFormatVersion 是 index.json 的格式版本。
 const IndexFormatVersion = 1
 
+const MaxJSONBytes = 64 << 20
+const MaxMetaBytes = 1 << 20
+
 // VersionInfo 是与每个 manifest 一起存储的元数据。
 type VersionInfo struct {
 	Version      string    `json:"version"`

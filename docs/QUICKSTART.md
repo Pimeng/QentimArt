@@ -4,7 +4,7 @@
 
 | 组件 | 要求 |
 |---|---|
-| 服务端 `qentimart-server` / 客户端 `qentimart` | Go ≥ 1.23（仅编译时需要，产物为单文件二进制） |
+| 服务端 `qentimart-server` / 客户端 `qentimart` | Go ≥ 1.27.4（仅编译时需要，产物为单文件二进制） |
 | Node.js SDK | Node.js ≥ 18，无第三方依赖 |
 | Python SDK | Python ≥ 3.8，仅用标准库 |
 | Java SDK | JDK ≥ 21，仅用标准库（Gradle 构建） |
@@ -18,12 +18,12 @@
 go build -o bin/ ./cmd/qentimart-server ./cmd/qentimart
 ```
 
-生成几个不同角色的 token（发布、只读拉取、运维），填进配置文件后启动：
+为发布、只读拉取和运维角色各生成一个独立的随机 token。服务端会拒绝示例中的 `CHANGE-ME-` 占位值和重复使用的 token。
 
 ```bash
-bin/qentimart-server gen-token
-cp examples/server.json server.local.json
-# 编辑 server.local.json 填入刚生成的 token
+bin/qentimart-server gen-token  # 每个角色单独运行一次
+install -m 600 examples/server.json server.local.json
+# 编辑 server.local.json，逐一替换三个 token
 bin/qentimart-server serve -config server.local.json
 ```
 
@@ -31,7 +31,7 @@ bin/qentimart-server serve -config server.local.json
 
 ```json
 {
-  "listen": ":8080",
+  "listen": "127.0.0.1:8080",
   "storage": { "type": "local", "path": "./data" },
   "tokens": [
     { "name": "ci-publisher", "token": "<token>", "role": "publish", "projects": ["*"] },
@@ -56,19 +56,21 @@ bin/qentimart-server serve -config server.local.json
 
 ### 使用 S3 / MinIO
 
-参考 [examples/server.s3.json](../examples/server.s3.json)。自建 MinIO 通常要设 `"pathStyle": true`；AWS S3、OSS、COS 一般保持默认的 `false`（virtual-hosted 风格）。非回环地址默认强制 `https://`，内网测试如果要走明文 HTTP，在 `s3` 下加 `"allowInsecureHTTP": true`。
+将示例中的访问密钥替换为仅有目标存储桶或对象前缀所需权限的专用凭据。自建 MinIO 通常要设 `"pathStyle": true`，AWS S3、OSS、COS 一般保持默认的 `false`（virtual-hosted 风格）。非回环端点默认要求 `https://`。 [S3 配置示例](../examples/server.s3.json)
 
 ### 使用 Docker
 
 ```bash
 docker build -t qentimart .
-docker run -d -p 8080:8080 \
+docker run -d -p 127.0.0.1:8080:8080 \
   -v /srv/qentimart/data:/data \
   -v /srv/qentimart/server.json:/etc/qentimart/server.json:ro \
   qentimart
 ```
 
-挂载本地目录时，配置文件里的 `storage.path` 改成 `/data`。
+容器内将 `listen` 设为 `:8080`，宿主机端口绑定到回环地址。挂载本地目录时，将 `storage.path` 设为 `/data`，并确保容器用户（UID 10001）可以读取配置文件、写入数据目录。
+
+远程访问时，通过 HTTPS 反向代理转发到服务端的本机监听端口，客户端使用 HTTPS 地址传送令牌。
 
 ## 2. 发布版本
 
@@ -129,7 +131,7 @@ with QentimArtClient("http://127.0.0.1:8080", "mygame", token=token) as client:
 ### Java
 
 ```bash
-cd sdk/java && ./gradlew build
+cd sdk/java && sh ./gradlew build
 ```
 
 ```java
