@@ -7,7 +7,7 @@ name = "qentimart-sdk"
 version = "0.1.4"
 description = "QentimArt 下游 SDK：拉取游戏资源版本，支持块级增量更新，无需本地对象缓存"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "Pimeng" }]
 dependencies = []
